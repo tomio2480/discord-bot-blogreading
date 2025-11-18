@@ -1,0 +1,185 @@
+import discord
+from discord.ext import commands
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
+from datetime import datetime, timedelta
+import pytz
+import os
+import json
+import requests
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# 環境変数の読み込み
+DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
+CHANNEL_ID = int(os.getenv('DISCORD_CHANNEL_ID'))
+HACKMD_API_TOKEN = os.getenv('HACKMD_API_TOKEN')
+ALLOWED_USER = 'tomio2480'
+
+# データファイル
+DATA_FILE = 'data.json'
+
+# 日本標準時
+JST = pytz.timezone('Asia/Tokyo')
+
+# Intentsの設定
+intents = discord.Intents.default()
+intents.message_content = True
+
+# Bot初期化
+bot = commands.Bot(command_prefix='!', intents=intents)
+scheduler = AsyncIOScheduler(timezone=JST)
+
+# データ管理
+def load_data():
+    if os.path.exists(DATA_FILE):
+        with open(DATA_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    return {'hackmd': None, 'connpass': None}
+
+def save_data(data):
+    with open(DATA_FILE, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+def get_next_monday():
+    """次の月曜日の日付を取得"""
+    now = datetime.now(JST)
+    days_ahead = 7 - now.weekday() if now.weekday() != 0 else 7
+    next_monday = now + timedelta(days=days_ahead)
+    return next_monday
+
+# HackMD API関連
+def create_hackmd_note(title, alias):
+    """HackMDのテンプレートから新規メモを作成"""
+    url = 'https://api.hackmd.io/v1/notes'
+    headers = {
+        'Authorization': f'Bearer {HACKMD_API_TOKEN}',
+        'Content-Type': 'application/json'
+    }
+    payload = {
+        'title': title,
+        'readPermission': 'signed_in',
+        'writePermission': 'signed_in',
+        'commentPermission': 'everyone',
+        'permalink': alias
+    }
+
+    response = requests.post(url, json=payload, headers=headers)
+    if response.status_code == 201:
+        note_id = response.json()['id']
+        return f'https://hackmd.io/{alias}'
+    return None
+
+# スケジュールされた投稿
+async def post_morning():
+    """月曜 08:00 (JST) の投稿"""
+    channel = bot.get_channel(CHANNEL_ID)
+    if channel:
+        await channel.send('📢 今日はブログを読む日です')
+
+async def post_reminder():
+    """月曜 18:15 (JST) の投稿"""
+    channel = bot.get_channel(CHANNEL_ID)
+    if channel:
+        await channel.send('👀 テックブログ一気読み選手権まであと少し')
+
+async def post_start():
+    """月曜 18:30 (JST) の投稿"""
+    channel = bot.get_channel(CHANNEL_ID)
+    if channel:
+        data = load_data()
+        now = datetime.now(JST)
+        date_str = now.strftime('%m/%d(月)')
+
+        hackmd_text = data.get('hackmd') or '（HackMD 未設定）'
+        connpass_text = data.get('connpass') or '（connpass 未設定）'
+
+        message = f"""{date_str}
+{hackmd_text}
+{connpass_text}
+
+18:38 くらいまでここから選んで読みましょう
+https://yamadashy.github.io/tech-blog-rss-feed/
+https://hatena.blog/dev
+https://techplay.jp/blog"""
+
+        await channel.send(message)
+
+async def post_create_hackmd():
+    """月曜 19:00 (JST) の投稿（HackMD作成）"""
+    channel = bot.get_channel(CHANNEL_ID)
+    if channel:
+        # 次の月曜日の日付を取得
+        next_monday = get_next_monday()
+
+        # yyyy=4桁年, MM=2桁月, dd=2桁日
+        title = next_monday.strftime('テックブログ一気読み選手権 %Y%m%d 杯')
+        alias = next_monday.strftime('blogread_%Y%m%d')
+
+        hackmd_url = create_hackmd_note(title, alias)
+
+        # データ保存
+        if hackmd_url:
+            data = load_data()
+            data['hackmd'] = hackmd_url
+            save_data(data)
+
+        # 投稿
+        date_str = next_monday.strftime('%m/%d (月)')
+        hackmd_text = hackmd_url or '（HackMD作成失敗）'
+
+        message = f"""{date_str} 分
+{hackmd_text}
+※ connpass のリンクが未設定の場合は，set コマンドで connpass のリンクを設定してください．"""
+
+        await channel.send(message)
+
+# コマンド処理
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
+
+    # tomio2480 のみコマンド実行可能
+    if message.author.name != ALLOWED_USER:
+        await bot.process_commands(message)
+        return
+
+    content = message.content.strip()
+
+    # set connpass コマンド
+    if content.startswith('set connpass '):
+        url = content.replace('set connpass ', '').strip()
+        data = load_data()
+        data['connpass'] = url
+        save_data(data)
+        await message.channel.send(f'✅ connpass URL を設定しました: {url}')
+        return
+
+    # set hackmd コマンド
+    if content.startswith('set hackmd '):
+        url = content.replace('set hackmd ', '').strip()
+        data = load_data()
+        data['hackmd'] = url
+        save_data(data)
+        await message.channel.send(f'✅ HackMD URL を設定しました: {url}')
+        return
+
+    await bot.process_commands(message)
+
+@bot.event
+async def on_ready():
+    print(f'{bot.user} でログインしました')
+
+    # スケジュール設定（月曜日のみ実行、すべてJST）
+    scheduler.add_job(post_morning, CronTrigger(day_of_week='mon', hour=8, minute=0))
+    scheduler.add_job(post_reminder, CronTrigger(day_of_week='mon', hour=18, minute=15))
+    scheduler.add_job(post_start, CronTrigger(day_of_week='mon', hour=18, minute=30))
+    scheduler.add_job(post_create_hackmd, CronTrigger(day_of_week='mon', hour=19, minute=0))
+
+    scheduler.start()
+    print('スケジューラーを起動しました（JST）')
+
+if __name__ == '__main__':
+    bot.run(DISCORD_TOKEN)
