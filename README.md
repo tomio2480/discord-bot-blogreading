@@ -67,14 +67,49 @@ Bot が起動すると，スラッシュコマンドが利用可能になりま�
 2. `url:` パラメータに URL を入力
 3. 入力内容と応答は自分にのみ表示されます
 
-## PythonAnywhere へのデプロイ
+## Northflank へのデプロイ（推奨）
 
-1. PythonAnywhere でアカウント作成
-2. Files タブからファイルをアップロード
-3. Consoles タブで Bash コンソールを開く
-4. 依存パッケージをインストール
-5. `.env` ファイルを作成して環境変数を設定
-6. `python bot.py` で起動
+Northflank の無料枠では常時起動が可能で，Discord bot に最適です。
+
+### 前提条件
+
+- GitHub アカウント
+- Northflank アカウント（[northflank.com](https://northflank.com) で無料登録）
+
+### デプロイ手順
+
+1. **GitHub リポジトリの作成**
+   ```bash
+   # GitHub で新規リポジトリを作成後
+   git remote add origin https://github.com/yourusername/discord-bot-blogreading.git
+   git push -u origin main
+   ```
+
+2. **Northflank でプロジェクト作成**
+   - [Northflank](https://app.northflank.com) にログイン
+   - "Create Project" をクリック
+   - プロジェクト名を入力
+
+3. **サービスの作成**
+   - "Add Service" → "Combined service"
+   - GitHub リポジトリを選択
+   - Build type: "Dockerfile"
+   - Port: 設定不要（Discord bot は HTTP サーバーではないため）
+
+4. **環境変数の設定**
+   - "Environment" タブで以下を追加：
+     - `DISCORD_TOKEN`: Discord Bot トークン
+     - `DISCORD_CHANNEL_ID`: チャンネル ID
+     - `HACKMD_API_TOKEN`: HackMD API トークン
+
+5. **デプロイ**
+   - "Deploy" をクリック
+   - ログで起動を確認
+
+### データ永続化の注意
+
+Northflank では再起動時にファイルが消えます。`data.json` は揮発性です。
+長期的には外部データベース（MongoDB Atlas 無料枠等）の使用を推奨します。
 
 ## 技術スタック
 

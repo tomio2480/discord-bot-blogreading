@@ -27,7 +27,7 @@ cp .env.example .env
 ### 主要コンポーネント
 
 1. **スケジューラ**: APScheduler で JST 月曜日の 4 つの時刻に自動投稿
-2. **コマンド処理**: `on_message` で `set connpass`, `set hackmd` を処理（tomio2480 のみ許可）
+2. **スラッシュコマンド**: `/set_connpass`, `/set_hackmd` を処理（tomio2480 のみ許可，ephemeral で他人に非表示）
 3. **HackMD 連携**: `create_hackmd_note()` で次週用メモを自動作成
 4. **データ永続化**: JSON ファイルで URL を保存
 
@@ -40,7 +40,13 @@ cp .env.example .env
 
 ### ホスティング
 
-PythonAnywhere を想定．常時起動が必要なため Vercel 等の Serverless 環境は不可．
+Northflank を推奨（無料枠で常時起動可能）．
+Docker でデプロイ．Vercel 等の Serverless 環境は不可（常時接続が必要なため）．
+
+### Docker 構成
+
+- **Dockerfile**: Python 3.11 slim ベース
+- **データ永続化の注意**: `data.json` は再起動で消えるため，長期的には外部 DB を推奨
 
 ---
 

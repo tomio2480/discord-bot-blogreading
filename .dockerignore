@@ -1,0 +1,11 @@
+.env
+data.json
+__pycache__/
+*.pyc
+*.pyo
+*.log
+.git/
+.gitignore
+README.md
+CLAUDE.md
+error
