@@ -9,9 +9,11 @@ Discord サーバー「とみおハウス」で動作する，テックブログ
   - 18:15: リマインダー
   - 18:30: ブログリンク集の投稿
   - 19:00: 次週用 HackMD 作成と投稿
-- `set connpass [URL]` で connpass リンクを設定
-- `set hackmd [URL]` で HackMD リンクを設定
-- コマンドは tomio2480 のみ実行可能
+- スラッシュコマンド
+  - `/set_connpass url:` で connpass リンクを設定
+  - `/set_hackmd url:` で HackMD リンクを設定
+  - コマンドと応答は実行者のみに表示（他のユーザーには見えません）
+  - コマンドは tomio2480 のみ実行可能
 
 ## セットアップ
 
@@ -36,9 +38,10 @@ HACKMD_API_TOKEN=your_hackmd_api_token_here
 1. [Discord Developer Portal](https://discord.com/developers/applications) でアプリケーション作成
 2. Bot タブで Bot を追加
 3. TOKEN をコピーして `.env` に設定
-4. Privileged Gateway Intents で `MESSAGE CONTENT INTENT` を有効化
-5. OAuth2 → URL Generator で `bot` スコープと `Send Messages` 権限を選択
-6. 生成された URL でサーバーに Bot を招待
+4. OAuth2 → URL Generator で以下を選択
+   - スコープ: `bot` と `applications.commands`
+   - Bot 権限: `Send Messages`
+5. 生成された URL でサーバーに Bot を招待
 
 ### 4. チャンネル ID の取得
 
@@ -55,6 +58,14 @@ Discord で開発者モードを有効化し，`#blogreading` チャンネルを
 ```bash
 python bot.py
 ```
+
+## 使い方
+
+Bot が起動すると，スラッシュコマンドが利用可能になります。
+
+1. Discord で `/set_connpass` または `/set_hackmd` を入力
+2. `url:` パラメータに URL を入力
+3. 入力内容と応答は自分にのみ表示されます
 
 ## PythonAnywhere へのデプロイ
 

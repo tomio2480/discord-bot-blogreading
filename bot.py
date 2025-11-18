@@ -1,4 +1,5 @@
 import discord
+from discord import app_commands
 from discord.ext import commands
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -25,7 +26,6 @@ JST = pytz.timezone('Asia/Tokyo')
 
 # Intentsの設定
 intents = discord.Intents.default()
-intents.message_content = True
 
 # Bot初期化
 bot = commands.Bot(command_prefix='!', intents=intents)
@@ -135,42 +135,40 @@ async def post_create_hackmd():
 
         await channel.send(message)
 
-# コマンド処理
-@bot.event
-async def on_message(message):
-    if message.author.bot:
+# スラッシュコマンド
+@bot.tree.command(name="set_connpass", description="connpass の URL を設定します")
+@app_commands.describe(url="connpass イベントの URL")
+async def set_connpass(interaction: discord.Interaction, url: str):
+    # tomio2480 のみ実行可能
+    if interaction.user.name != ALLOWED_USER:
+        await interaction.response.send_message('❌ このコマンドを実行する権限がありません', ephemeral=True)
         return
 
-    # tomio2480 のみコマンド実行可能
-    if message.author.name != ALLOWED_USER:
-        await bot.process_commands(message)
+    data = load_data()
+    data['connpass'] = url
+    save_data(data)
+    await interaction.response.send_message(f'✅ connpass URL を設定しました: {url}', ephemeral=True)
+
+@bot.tree.command(name="set_hackmd", description="HackMD の URL を設定します")
+@app_commands.describe(url="HackMD メモの URL")
+async def set_hackmd(interaction: discord.Interaction, url: str):
+    # tomio2480 のみ実行可能
+    if interaction.user.name != ALLOWED_USER:
+        await interaction.response.send_message('❌ このコマンドを実行する権限がありません', ephemeral=True)
         return
 
-    content = message.content.strip()
-
-    # set connpass コマンド
-    if content.startswith('set connpass '):
-        url = content.replace('set connpass ', '').strip()
-        data = load_data()
-        data['connpass'] = url
-        save_data(data)
-        await message.channel.send(f'✅ connpass URL を設定しました: {url}')
-        return
-
-    # set hackmd コマンド
-    if content.startswith('set hackmd '):
-        url = content.replace('set hackmd ', '').strip()
-        data = load_data()
-        data['hackmd'] = url
-        save_data(data)
-        await message.channel.send(f'✅ HackMD URL を設定しました: {url}')
-        return
-
-    await bot.process_commands(message)
+    data = load_data()
+    data['hackmd'] = url
+    save_data(data)
+    await interaction.response.send_message(f'✅ HackMD URL を設定しました: {url}', ephemeral=True)
 
 @bot.event
 async def on_ready():
     print(f'{bot.user} でログインしました')
+
+    # スラッシュコマンドを同期
+    await bot.tree.sync()
+    print('スラッシュコマンドを同期しました')
 
     # スケジュール設定（月曜日のみ実行、すべてJST）
     scheduler.add_job(post_morning, CronTrigger(day_of_week='mon', hour=8, minute=0))
