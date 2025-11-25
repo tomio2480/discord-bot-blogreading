@@ -50,7 +50,20 @@ def get_next_monday():
     return next_monday
 
 # HackMD API関連
-def create_hackmd_note(title, alias):
+def get_hackmd_template():
+    """テンプレートの内容を取得"""
+    template_id = 'Ocjjk_IDTDyi9tS76ARjbw'
+    url = f'https://api.hackmd.io/v1/notes/{template_id}'
+    headers = {
+        'Authorization': f'Bearer {HACKMD_API_TOKEN}',
+    }
+    
+    response = requests.get(url, headers=headers)
+    if response.status_code == 200:
+        return response.json().get('content', '')
+    return None
+
+def create_hackmd_note(title, alias, content=''):
     """HackMDのテンプレートから新規メモを作成"""
     url = 'https://api.hackmd.io/v1/notes'
     headers = {
@@ -59,6 +72,7 @@ def create_hackmd_note(title, alias):
     }
     payload = {
         'title': title,
+        'content': content,
         'readPermission': 'signed_in',
         'writePermission': 'signed_in',
         'commentPermission': 'everyone',
@@ -68,6 +82,11 @@ def create_hackmd_note(title, alias):
     response = requests.post(url, json=payload, headers=headers)
     if response.status_code == 201:
         note_id = response.json()['id']
+        # コンテンツが設定されていない場合、PATCHで更新を試みる
+        if content and response.json().get('content') != content:
+            patch_url = f'https://api.hackmd.io/v1/notes/{note_id}'
+            patch_payload = {'content': content}
+            requests.patch(patch_url, json=patch_payload, headers=headers)
         return f'https://hackmd.io/{alias}'
     return None
 
@@ -106,6 +125,18 @@ https://techplay.jp/blog"""
 
         await channel.send(message)
 
+async def post_writing_time():
+    """月曜 18:38 (JST) の投稿"""
+    channel = bot.get_channel(CHANNEL_ID)
+    if channel:
+        await channel.send('18:38 になりました\n感想を書きましょう')
+
+async def post_sharing_reminder():
+    """月曜 18:42 (JST) の投稿"""
+    channel = bot.get_channel(CHANNEL_ID)
+    if channel:
+        await channel.send('そろそろ感想を共有します\n画面共有の準備をしてください')
+
 async def post_create_hackmd():
     """月曜 19:00 (JST) の投稿（HackMD作成）"""
     channel = bot.get_channel(CHANNEL_ID)
@@ -117,7 +148,12 @@ async def post_create_hackmd():
         title = next_monday.strftime('テックブログ一気読み選手権 %Y%m%d 杯')
         alias = next_monday.strftime('blogread_%Y%m%d')
 
-        hackmd_url = create_hackmd_note(title, alias)
+        # テンプレート内容を取得
+        template_content = get_hackmd_template()
+        if template_content is None:
+            template_content = ''  # テンプレート取得失敗時は空文字
+
+        hackmd_url = create_hackmd_note(title, alias, template_content)
 
         # データ保存
         if hackmd_url:
@@ -136,6 +172,28 @@ async def post_create_hackmd():
         await channel.send(message)
 
 # スラッシュコマンド
+@bot.tree.command(name="ls", description="次の月曜日の日付と設定されているリンクを表示します")
+async def ls(interaction: discord.Interaction):
+    # tomio2480 のみ実行可能
+    if interaction.user.name != ALLOWED_USER:
+        await interaction.response.send_message('❌ このコマンドを実行する権限がありません', ephemeral=True)
+        return
+
+    # 次の月曜日の日付を取得
+    next_monday = get_next_monday()
+    date_str = next_monday.strftime('%m/%d (月)')
+
+    # 現在の設定を読み込み
+    data = load_data()
+    hackmd_text = data.get('hackmd') or '（HackMD 未設定）'
+    connpass_text = data.get('connpass') or '（connpass 未設定）'
+
+    message = f"""次の月曜日: {date_str}
+HackMD: {hackmd_text}
+connpass: {connpass_text}"""
+
+    await interaction.response.send_message(message, ephemeral=True)
+
 @bot.tree.command(name="set_connpass", description="connpass の URL を設定します")
 @app_commands.describe(url="connpass イベントの URL")
 async def set_connpass(interaction: discord.Interaction, url: str):
@@ -174,6 +232,8 @@ async def on_ready():
     scheduler.add_job(post_morning, CronTrigger(day_of_week='mon', hour=8, minute=0))
     scheduler.add_job(post_reminder, CronTrigger(day_of_week='mon', hour=18, minute=15))
     scheduler.add_job(post_start, CronTrigger(day_of_week='mon', hour=18, minute=30))
+    scheduler.add_job(post_writing_time, CronTrigger(day_of_week='mon', hour=18, minute=38))
+    scheduler.add_job(post_sharing_reminder, CronTrigger(day_of_week='mon', hour=18, minute=42))
     scheduler.add_job(post_create_hackmd, CronTrigger(day_of_week='mon', hour=19, minute=0))
 
     scheduler.start()
