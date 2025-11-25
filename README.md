@@ -13,6 +13,7 @@ Discord サーバー「とみおハウス」で動作する，テックブログ
   - 19:00: 次週用 HackMD 作成と投稿
 - スラッシュコマンド
   - `/ls` で次の月曜日の日付と設定されているリンクを表示
+  - `/announce` で次回の月曜日の情報をチャンネルに投稿
   - `/set_connpass url:` で connpass リンクを設定
   - `/set_hackmd url:` で HackMD リンクを設定
   - `/check_time` で現在時刻とタイムゾーンを確認

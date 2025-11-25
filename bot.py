@@ -203,6 +203,12 @@ https://hatena.blog/dev
 https://techplay.jp/blog"""
 
         await channel.send(message)
+        
+        # 投稿後にデータを削除（19:00の新規作成のため）
+        data['hackmd'] = None
+        data['connpass'] = None
+        save_data(data)
+        print('18:30投稿後にデータを削除しました')
 
 async def post_writing_time():
     """月曜 18:38 (JST) の投稿"""
@@ -272,6 +278,46 @@ HackMD: {hackmd_text}
 connpass: {connpass_text}"""
 
     await interaction.response.send_message(message, ephemeral=True)
+
+@bot.tree.command(name="announce", description="次回の月曜日の情報をチャンネルに投稿します")
+async def announce(interaction: discord.Interaction):
+    # tomio2480 のみ実行可能
+    if interaction.user.name != ALLOWED_USER:
+        await interaction.response.send_message('❌ このコマンドを実行する権限がありません', ephemeral=True)
+        return
+
+    # 次の月曜日の日付を取得
+    next_monday = get_next_monday()
+    date_str = next_monday.strftime('%m/%d(%a)')
+
+    # 現在の設定を読み込み
+    data = load_data()
+    hackmd_url = data.get('hackmd')
+    connpass_url = data.get('connpass')
+    
+    # URLが空の場合は警告を表示
+    if not hackmd_url or not connpass_url:
+        missing = []
+        if not hackmd_url:
+            missing.append('HackMD')
+        if not connpass_url:
+            missing.append('connpass')
+        
+        warning = f"⚠️ {' と '.join(missing)} の URL が設定されていません。\n先に `/set_hackmd` と `/set_connpass` で URL を設定してください。"
+        await interaction.response.send_message(warning, ephemeral=True)
+        return
+
+    message = f"""次回 {date_str} 分
+{hackmd_url}
+{connpass_url}"""
+
+    # チャンネルに投稿（ephemeralではない）
+    channel = bot.get_channel(CHANNEL_ID)
+    if channel:
+        await channel.send(message)
+        await interaction.response.send_message('✅ お知らせを投稿しました', ephemeral=True)
+    else:
+        await interaction.response.send_message('❌ チャンネルが見つかりません', ephemeral=True)
 
 @bot.tree.command(name="set_connpass", description="connpass の URL を設定します")
 @app_commands.describe(url="connpass イベントの URL")
