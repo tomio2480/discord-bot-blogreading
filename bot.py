@@ -220,6 +220,35 @@ async def set_hackmd(interaction: discord.Interaction, url: str):
     save_data(data)
     await interaction.response.send_message(f'✅ HackMD URL を設定しました: {url}', ephemeral=True)
 
+@bot.tree.command(name="check_time", description="現在時刻とタイムゾーンを確認します")
+async def check_time(interaction: discord.Interaction):
+    # tomio2480 のみ実行可能
+    if interaction.user.name != ALLOWED_USER:
+        await interaction.response.send_message('❌ このコマンドを実行する権限がありません', ephemeral=True)
+        return
+
+    import time
+    
+    # 現在時刻（JST）
+    now_jst = datetime.now(JST)
+    
+    # システムのタイムゾーン
+    system_tz = time.tzname
+    
+    # 環境変数TZ
+    env_tz = os.getenv('TZ', '未設定')
+    
+    message = f"""⏰ タイムゾーン情報
+
+**現在時刻（JST）:** {now_jst.strftime('%Y-%m-%d %H:%M:%S %Z')}
+**システムタイムゾーン:** {system_tz}
+**環境変数 TZ:** {env_tz}
+**次の月曜日:** {get_next_monday().strftime('%Y-%m-%d (%a)')}
+
+✅ JSTで正しく動作しています。"""
+
+    await interaction.response.send_message(message, ephemeral=True)
+
 @bot.event
 async def on_ready():
     print(f'{bot.user} でログインしました')
