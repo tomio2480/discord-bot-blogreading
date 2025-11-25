@@ -151,7 +151,7 @@ def test_create_hackmd_note_success():
     with patch('requests.post', return_value=mock_response):
         result = bot.create_hackmd_note('テストタイトル', 'test_alias', '')
         
-    assert result == 'https://hackmd.io/test_alias'
+    assert result == 'https://hackmd.io/@tomio2480/test_alias'
 
 
 def test_create_hackmd_note_with_content():
@@ -167,7 +167,7 @@ def test_create_hackmd_note_with_content():
         with patch('requests.patch', return_value=mock_patch_response):
             result = bot.create_hackmd_note('テストタイトル', 'test_alias', '# テスト内容')
             
-    assert result == 'https://hackmd.io/test_alias'
+    assert result == 'https://hackmd.io/@tomio2480/test_alias'
 
 
 def test_create_hackmd_note_failure():
@@ -350,7 +350,7 @@ async def test_post_create_hackmd():
     test_date = datetime(2024, 1, 8, 12, 0, 0, tzinfo=JST)  # 次の月曜日
     
     template_content = '# テンプレート'
-    hackmd_url = 'https://hackmd.io/blogread_20240108'
+    hackmd_url = 'https://hackmd.io/@tomio2480/blogread_20240108'
     
     with patch.object(bot.bot, 'get_channel', return_value=mock_channel):
         with patch('bot.get_next_monday', return_value=test_date):

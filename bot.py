@@ -87,7 +87,7 @@ def create_hackmd_note(title, alias, content=''):
             patch_url = f'https://api.hackmd.io/v1/notes/{note_id}'
             patch_payload = {'content': content}
             requests.patch(patch_url, json=patch_payload, headers=headers)
-        return f'https://hackmd.io/{alias}'
+        return f'https://hackmd.io/@tomio2480/{alias}'
     return None
 
 # スケジュールされた投稿
