@@ -288,7 +288,7 @@ async def announce(interaction: discord.Interaction):
 
     # 次の月曜日の日付を取得
     next_monday = get_next_monday()
-    date_str = next_monday.strftime('%m/%d(%a)')
+    date_str = next_monday.strftime('%m/%d(月)')
 
     # 現在の設定を読み込み
     data = load_data()
