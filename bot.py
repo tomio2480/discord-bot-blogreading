@@ -9,6 +9,8 @@ import os
 import json
 import requests
 from dotenv import load_dotenv
+import gspread
+from google.oauth2.service_account import Credentials
 
 load_dotenv()
 
@@ -31,16 +33,93 @@ intents = discord.Intents.default()
 bot = commands.Bot(command_prefix='!', intents=intents)
 scheduler = AsyncIOScheduler(timezone=JST)
 
+# Google Sheets接続
+def get_sheets_client():
+    """Google Sheetsクライアントを取得"""
+    try:
+        creds_json = os.getenv('GOOGLE_SHEETS_CREDENTIALS')
+        if not creds_json:
+            return None
+        
+        creds_dict = json.loads(creds_json)
+        creds = Credentials.from_service_account_info(
+            creds_dict,
+            scopes=['https://www.googleapis.com/auth/spreadsheets']
+        )
+        return gspread.authorize(creds)
+    except Exception as e:
+        print(f'Google Sheetsクライアント取得エラー: {e}')
+        return None
+
+def get_worksheet():
+    """ワークシートを取得"""
+    try:
+        client = get_sheets_client()
+        if not client:
+            return None
+        
+        spreadsheet_id = os.getenv('GOOGLE_SHEETS_SPREADSHEET_ID')
+        if not spreadsheet_id:
+            return None
+        
+        spreadsheet = client.open_by_key(spreadsheet_id)
+        return spreadsheet.sheet1
+    except Exception as e:
+        print(f'ワークシート取得エラー: {e}')
+        return None
+
 # データ管理
 def load_data():
+    """Google Sheetsまたはローカルファイルからデータを読み込み"""
+    try:
+        worksheet = get_worksheet()
+        if worksheet:
+            # Google Sheetsから全データを取得
+            records = worksheet.get_all_records()
+            data = {}
+            for record in records:
+                key = record.get('キー') or record.get('key')
+                value = record.get('値') or record.get('value')
+                if key:
+                    data[key] = value
+            
+            print(f'Google Sheetsからデータを読み込みました: {data}')
+            return data if data else {'hackmd': None, 'connpass': None}
+    except Exception as e:
+        print(f'Google Sheetsからのデータ読み込みエラー: {e}')
+    
+    # Google Sheets未設定またはエラー時はローカルファイルを使用
     if os.path.exists(DATA_FILE):
         with open(DATA_FILE, 'r', encoding='utf-8') as f:
             return json.load(f)
     return {'hackmd': None, 'connpass': None}
 
 def save_data(data):
+    """Google Sheetsまたはローカルファイルにデータを保存"""
+    try:
+        worksheet = get_worksheet()
+        if worksheet:
+            # 既存データをクリア
+            worksheet.clear()
+            
+            # ヘッダーを設定
+            worksheet.update('A1:B1', [['キー', '値']])
+            
+            # データを書き込み
+            rows = [[key, value if value else ''] for key, value in data.items()]
+            if rows:
+                worksheet.update(f'A2:B{len(rows)+1}', rows)
+            
+            print(f'Google Sheetsにデータを保存しました: {data}')
+            return
+    except Exception as e:
+        print(f'Google Sheetsへのデータ保存エラー: {e}')
+    
+    # Google Sheets未設定またはエラー時はローカルファイルを使用
+    os.makedirs(os.path.dirname(DATA_FILE) if os.path.dirname(DATA_FILE) else '.', exist_ok=True)
     with open(DATA_FILE, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+    print(f'ローカルファイルにデータを保存しました: {data}')
 
 def get_next_monday():
     """次の月曜日の日付を取得"""

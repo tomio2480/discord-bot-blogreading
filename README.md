@@ -57,6 +57,21 @@ Discord で開発者モードを有効化し，`#blogreading` チャンネルを
 2. API タブでトークンを生成
 3. トークンを `.env` に設定
 
+### 6. Google Sheets データ保存の設定（推奨）
+
+Bot の再起動後もデータを保持するため、Google Sheets を使用したデータ保存を推奨します。
+
+詳細な手順は [GOOGLE_SHEETS_SETUP.md](GOOGLE_SHEETS_SETUP.md) を参照してください。
+
+**メリット：**
+- Bot 再起動後もデータが保持される
+- Web ブラウザで直接データを確認・編集可能
+- 完全無料
+
+**設定しない場合：**
+- Northflank での再起動時にデータが消えます
+- `/set_connpass` と `/set_hackmd` で設定したリンクが失われます
+
 ## 実行
 
 ```bash
