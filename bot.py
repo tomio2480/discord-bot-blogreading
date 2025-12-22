@@ -241,7 +241,10 @@ async def post_create_hackmd():
         if template_content is None:
             template_content = ''  # テンプレート取得失敗時は空文字
 
-        hackmd_url = create_hackmd_note(title, alias, template_content)
+        # タイトルを content の先頭に追加（HackMD はドキュメント内の # 見出しをタイトルとして表示）
+        content_with_title = f'# {title}\n\n{template_content}'
+
+        hackmd_url = create_hackmd_note(title, alias, content_with_title)
 
         # データ保存
         if hackmd_url:
