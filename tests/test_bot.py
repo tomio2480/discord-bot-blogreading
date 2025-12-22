@@ -13,11 +13,17 @@ from datetime import datetime, timedelta
 from unittest.mock import Mock, AsyncMock, patch, mock_open, MagicMock
 import pytz
 
+# テスト用の環境変数を設定（bot.py インポート前に必要）
+os.environ.setdefault('DISCORD_TOKEN', 'test_token')
+os.environ.setdefault('DISCORD_CHANNEL_ID', '123456789')
+os.environ.setdefault('HACKMD_API_TOKEN', 'test_hackmd_token')
+
 # discord.pyのインポートをモック化（Python 3.13のaudioop問題を回避）
 sys.modules['discord'] = MagicMock()
 sys.modules['discord.ext'] = MagicMock()
 sys.modules['discord.ext.commands'] = MagicMock()
 sys.modules['discord.app_commands'] = MagicMock()
+sys.modules['feedparser'] = MagicMock()
 
 # bot.pyをインポート
 import bot
@@ -364,3 +370,158 @@ async def test_post_create_hackmd():
     call_args = mock_channel.send.call_args[0][0]
     assert '01/08 (月)' in call_args
     assert hackmd_url in call_args
+
+
+# ========================================
+# 二重投稿防止のテスト
+# ========================================
+
+def test_scheduler_started_flag_initial():
+    """スケジューラ初期化フラグの初期値"""
+    # bot.py がインポートされた直後は False
+    # ただし、テスト実行順によっては True になっている可能性があるため
+    # フラグの存在確認のみ行う
+    assert hasattr(bot, 'scheduler_started')
+
+
+# ========================================
+# connpass RSS 自動取得のテスト
+# ========================================
+
+def test_get_next_monday_date_str():
+    """次の月曜日の日付文字列（yyyyMMdd形式）を取得"""
+    JST = pytz.timezone('Asia/Tokyo')
+    test_date = datetime(2024, 1, 1, 12, 0, 0, tzinfo=JST)  # 月曜日
+    next_monday = test_date + timedelta(days=7)  # 次の月曜日は1/8
+
+    with patch('bot.get_next_monday', return_value=next_monday):
+        result = bot.get_next_monday_date_str()
+
+    assert result == '20240108'
+
+
+def test_check_connpass_rss_found():
+    """RSS から次の月曜日のイベントが見つかった場合"""
+    JST = pytz.timezone('Asia/Tokyo')
+    next_monday = datetime(2024, 1, 8, 12, 0, 0, tzinfo=JST)
+
+    mock_feed = MagicMock()
+    mock_feed.entries = [
+        {'title': 'テックブログ一気読み選手権20240108杯', 'link': 'https://blogreading.connpass.com/event/12345/'},
+        {'title': '別のイベント', 'link': 'https://connpass.com/other/'},
+    ]
+
+    with patch('bot.get_next_monday', return_value=next_monday):
+        with patch('bot.feedparser.parse', return_value=mock_feed):
+            result = bot.check_connpass_rss()
+
+    assert result == 'https://blogreading.connpass.com/event/12345/'
+
+
+def test_check_connpass_rss_not_found():
+    """RSS から次の月曜日のイベントが見つからない場合"""
+    JST = pytz.timezone('Asia/Tokyo')
+    next_monday = datetime(2024, 1, 8, 12, 0, 0, tzinfo=JST)
+
+    mock_feed = MagicMock()
+    mock_feed.entries = [
+        {'title': 'テックブログ一気読み選手権20240101杯', 'link': 'https://blogreading.connpass.com/event/99999/'},
+    ]
+
+    with patch('bot.get_next_monday', return_value=next_monday):
+        with patch('bot.feedparser.parse', return_value=mock_feed):
+            result = bot.check_connpass_rss()
+
+    assert result is None
+
+
+def test_check_connpass_rss_empty_feed():
+    """RSS が空の場合"""
+    mock_feed = MagicMock()
+    mock_feed.entries = []
+
+    with patch('bot.feedparser.parse', return_value=mock_feed):
+        result = bot.check_connpass_rss()
+
+    assert result is None
+
+
+def test_check_connpass_rss_error():
+    """RSS 取得エラーの場合"""
+    with patch('bot.feedparser.parse', side_effect=Exception('Network error')):
+        result = bot.check_connpass_rss()
+
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_check_and_post_connpass_already_set():
+    """connpass URL が設定済みの場合はスキップ"""
+    test_data = {'hackmd': 'https://hackmd.io/test', 'connpass': 'https://connpass.com/existing'}
+
+    with patch('bot.load_data', return_value=test_data):
+        with patch('bot.check_connpass_rss') as mock_check:
+            await bot.check_and_post_connpass()
+            # RSS チェックが呼ばれないことを確認
+            mock_check.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_check_and_post_connpass_not_found():
+    """RSS からイベントが見つからない場合"""
+    test_data = {'hackmd': 'https://hackmd.io/test', 'connpass': None}
+
+    with patch('bot.load_data', return_value=test_data):
+        with patch('bot.check_connpass_rss', return_value=None):
+            with patch('bot.save_data') as mock_save:
+                await bot.check_and_post_connpass()
+                # save_data が呼ばれないことを確認
+                mock_save.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_check_and_post_connpass_found_and_post():
+    """RSS からイベントが見つかり、投稿する場合"""
+    mock_channel = AsyncMock()
+    test_data = {'hackmd': 'https://hackmd.io/test', 'connpass': None}
+    connpass_url = 'https://blogreading.connpass.com/event/12345/'
+
+    JST = pytz.timezone('Asia/Tokyo')
+    next_monday = datetime(2024, 1, 8, 12, 0, 0, tzinfo=JST)
+
+    with patch('bot.load_data', return_value=test_data):
+        with patch('bot.check_connpass_rss', return_value=connpass_url):
+            with patch('bot.save_data') as mock_save:
+                with patch('bot.get_next_monday', return_value=next_monday):
+                    with patch.object(bot.bot, 'get_channel', return_value=mock_channel):
+                        await bot.check_and_post_connpass()
+
+    # データが保存されたことを確認
+    mock_save.assert_called_once()
+    saved_data = mock_save.call_args[0][0]
+    assert saved_data['connpass'] == connpass_url
+
+    # 投稿が行われたことを確認
+    mock_channel.send.assert_called_once()
+    call_args = mock_channel.send.call_args[0][0]
+    assert '01/08(月)' in call_args
+    assert 'https://hackmd.io/test' in call_args
+    assert connpass_url in call_args
+
+
+@pytest.mark.asyncio
+async def test_check_and_post_connpass_no_hackmd():
+    """hackmd が未設定の場合は投稿しない"""
+    mock_channel = AsyncMock()
+    test_data = {'hackmd': None, 'connpass': None}
+    connpass_url = 'https://blogreading.connpass.com/event/12345/'
+
+    with patch('bot.load_data', return_value=test_data):
+        with patch('bot.check_connpass_rss', return_value=connpass_url):
+            with patch('bot.save_data') as mock_save:
+                with patch.object(bot.bot, 'get_channel', return_value=mock_channel):
+                    await bot.check_and_post_connpass()
+
+    # connpass URL は保存されるが、投稿は行われない
+    mock_save.assert_called_once()
+    mock_channel.send.assert_not_called()

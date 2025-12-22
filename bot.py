@@ -3,11 +3,14 @@ from discord import app_commands
 from discord.ext import commands
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 from datetime import datetime, timedelta
 import pytz
 import os
 import json
+import re
 import requests
+import feedparser
 from dotenv import load_dotenv
 import gspread
 from google.oauth2.service_account import Credentials
@@ -256,6 +259,64 @@ async def post_create_hackmd():
 
         await channel.send(message)
 
+# connpass RSS 自動取得
+CONNPASS_RSS_URL = 'https://blogreading.connpass.com/ja.atom'
+
+def get_next_monday_date_str():
+    """次の月曜日の日付文字列（yyyyMMdd形式）を取得"""
+    next_monday = get_next_monday()
+    return next_monday.strftime('%Y%m%d')
+
+def check_connpass_rss():
+    """connpass RSS から次の月曜日のイベントを探す"""
+    try:
+        feed = feedparser.parse(CONNPASS_RSS_URL)
+        if not feed.entries:
+            return None
+
+        next_monday_str = get_next_monday_date_str()
+        pattern = rf'テックブログ一気読み選手権{next_monday_str}杯'
+
+        for entry in feed.entries:
+            title = entry.get('title', '')
+            if re.search(pattern, title):
+                return entry.get('link')
+        return None
+    except Exception as e:
+        print(f'connpass RSS 取得エラー: {e}')
+        return None
+
+async def check_and_post_connpass():
+    """connpass URL が未設定の場合、RSS をチェックして自動投稿"""
+    data = load_data()
+
+    # connpass URL が設定済みの場合はスキップ
+    if data.get('connpass'):
+        return
+
+    # RSS から次の月曜日のイベントを探す
+    connpass_url = check_connpass_rss()
+    if not connpass_url:
+        return
+
+    # connpass URL を保存
+    data['connpass'] = connpass_url
+    save_data(data)
+    print(f'connpass URL を自動設定しました: {connpass_url}')
+
+    # /announce と同じ内容を投稿
+    channel = bot.get_channel(CHANNEL_ID)
+    if channel:
+        hackmd_url = data.get('hackmd')
+        if hackmd_url:
+            next_monday = get_next_monday()
+            date_str = next_monday.strftime('%m/%d(月)')
+            message = f"""次回 {date_str} 分
+{hackmd_url}
+{connpass_url}"""
+            await channel.send(message)
+            print('connpass 自動取得による投稿を行いました')
+
 # スラッシュコマンド
 @bot.tree.command(name="ls", description="次の月曜日の日付と設定されているリンクを表示します")
 async def ls(interaction: discord.Interaction):
@@ -374,24 +435,36 @@ async def check_time(interaction: discord.Interaction):
 
     await interaction.response.send_message(message, ephemeral=True)
 
+# スケジューラ初期化フラグ
+scheduler_started = False
+
 @bot.event
 async def on_ready():
+    global scheduler_started
     print(f'{bot.user} でログインしました')
 
     # スラッシュコマンドを同期
     await bot.tree.sync()
     print('スラッシュコマンドを同期しました')
 
-    # スケジュール設定（月曜日のみ実行、すべてJST）
-    scheduler.add_job(post_morning, CronTrigger(day_of_week='mon', hour=8, minute=0))
-    scheduler.add_job(post_reminder, CronTrigger(day_of_week='mon', hour=18, minute=15))
-    scheduler.add_job(post_start, CronTrigger(day_of_week='mon', hour=18, minute=30))
-    scheduler.add_job(post_writing_time, CronTrigger(day_of_week='mon', hour=18, minute=38))
-    scheduler.add_job(post_sharing_reminder, CronTrigger(day_of_week='mon', hour=18, minute=42))
-    scheduler.add_job(post_create_hackmd, CronTrigger(day_of_week='mon', hour=19, minute=0))
+    # スケジューラは一度だけ設定（再接続時の二重登録を防止）
+    if not scheduler_started:
+        # スケジュール設定（月曜日のみ実行、すべてJST）
+        scheduler.add_job(post_morning, CronTrigger(day_of_week='mon', hour=8, minute=0), id='post_morning')
+        scheduler.add_job(post_reminder, CronTrigger(day_of_week='mon', hour=18, minute=15), id='post_reminder')
+        scheduler.add_job(post_start, CronTrigger(day_of_week='mon', hour=18, minute=30), id='post_start')
+        scheduler.add_job(post_writing_time, CronTrigger(day_of_week='mon', hour=18, minute=38), id='post_writing_time')
+        scheduler.add_job(post_sharing_reminder, CronTrigger(day_of_week='mon', hour=18, minute=42), id='post_sharing_reminder')
+        scheduler.add_job(post_create_hackmd, CronTrigger(day_of_week='mon', hour=19, minute=0), id='post_create_hackmd')
 
-    scheduler.start()
-    print('スケジューラーを起動しました（JST）')
+        # connpass RSS 自動取得（10分間隔）
+        scheduler.add_job(check_and_post_connpass, IntervalTrigger(minutes=10), id='check_connpass_rss')
+
+        scheduler.start()
+        scheduler_started = True
+        print('スケジューラーを起動しました（JST）')
+    else:
+        print('スケジューラーは既に起動済みです（再接続）')
 
 if __name__ == '__main__':
     bot.run(DISCORD_TOKEN)
