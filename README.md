@@ -11,6 +11,9 @@ Discord サーバー「とみおハウス」で動作する，テックブログ
   - 18:38: 感想記入の促し
   - 18:42: 画面共有準備の促し
   - 19:00: 次週用 HackMD 作成と投稿
+- connpass RSS 自動取得（10分間隔）
+  - connpass URL が未設定の場合、RSS から次の月曜日のイベントを自動検出
+  - 検出時はスプレッドシートに保存し、Discord に自動投稿
 - スラッシュコマンド
   - `/ls` で次の月曜日の日付と設定されているリンクを表示
   - `/announce` で次回の月曜日の情報をチャンネルに投稿
@@ -137,3 +140,5 @@ Northflank では再起動時にファイルが消えます。`data.json` は揮
 - discord.py
 - APScheduler（JST スケジューリング）
 - HackMD API
+- feedparser（RSS 解析）
+- gspread（Google Sheets 連携）
