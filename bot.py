@@ -250,13 +250,30 @@ async def post_create_hackmd():
         if hackmd_url:
             data = load_data()
             data['hackmd'] = hackmd_url
+
+            # connpass URL が未設定の場合、RSS から自動取得を試みる
+            if not data.get('connpass'):
+                connpass_url = check_connpass_rss()
+                if connpass_url:
+                    data['connpass'] = connpass_url
+                    print(f'connpass URL を自動設定しました: {connpass_url}')
+
             save_data(data)
 
         # 投稿
         date_str = next_monday.strftime('%m/%d (月)')
         hackmd_text = hackmd_url or '（HackMD作成失敗）'
 
-        message = f"""{date_str} 分
+        # connpass が設定済みの場合は connpass URL も含める
+        data = load_data()
+        connpass_url = data.get('connpass')
+
+        if connpass_url:
+            message = f"""{date_str} 分
+{hackmd_text}
+{connpass_url}"""
+        else:
+            message = f"""{date_str} 分
 {hackmd_text}
 ※ connpass のリンクが未設定の場合は，set コマンドで connpass のリンクを設定してください．"""
 
@@ -283,7 +300,9 @@ def check_connpass_rss():
         for entry in feed.entries:
             title = entry.get('title', '')
             if re.search(pattern, title):
-                return entry.get('link')
+                # URLから ? 以降のパラメータを削除
+                url = entry.get('link', '')
+                return url.split('?')[0] if url else None
         return None
     except Exception as e:
         print(f'connpass RSS 取得エラー: {e}')
@@ -391,10 +410,13 @@ async def set_connpass(interaction: discord.Interaction, url: str):
         await interaction.response.send_message('❌ このコマンドを実行する権限がありません', ephemeral=True)
         return
 
+    # URLから ? 以降のパラメータを削除
+    clean_url = url.split('?')[0]
+
     data = load_data()
-    data['connpass'] = url
+    data['connpass'] = clean_url
     save_data(data)
-    await interaction.response.send_message(f'✅ connpass URL を設定しました: {url}', ephemeral=True)
+    await interaction.response.send_message(f'✅ connpass URL を設定しました: {clean_url}', ephemeral=True)
 
 @bot.tree.command(name="set_hackmd", description="HackMD の URL を設定します")
 @app_commands.describe(url="HackMD メモの URL")
