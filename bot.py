@@ -98,30 +98,25 @@ def load_data():
     return {'hackmd': None, 'connpass': None}
 
 def save_data(data):
-    """Google Sheetsまたはローカルファイルにデータを保存"""
+    """Google Sheetsとローカルファイルの両方にデータを保存"""
+    # ローカルファイルに常に保存（フォールバック時の整合性を保証）
+    os.makedirs(os.path.dirname(DATA_FILE) if os.path.dirname(DATA_FILE) else '.', exist_ok=True)
+    with open(DATA_FILE, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
     try:
         worksheet = get_worksheet()
         if worksheet:
-            # 既存データをクリア
             worksheet.clear()
-            
-            # ヘッダーを設定
             worksheet.update('A1:B1', [['キー', '値']])
-            
-            # データを書き込み
             rows = [[key, value if value else ''] for key, value in data.items()]
             if rows:
                 worksheet.update(f'A2:B{len(rows)+1}', rows)
-            
             print(f'Google Sheetsにデータを保存しました: {data}')
             return
     except Exception as e:
         print(f'Google Sheetsへのデータ保存エラー: {e}')
-    
-    # Google Sheets未設定またはエラー時はローカルファイルを使用
-    os.makedirs(os.path.dirname(DATA_FILE) if os.path.dirname(DATA_FILE) else '.', exist_ok=True)
-    with open(DATA_FILE, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+
     print(f'ローカルファイルにデータを保存しました: {data}')
 
 def get_next_monday():
@@ -205,13 +200,16 @@ https://yamadashy.github.io/tech-blog-rss-feed/
 https://hatena.blog/dev
 https://techplay.jp/blog"""
 
-        await channel.send(message)
-        
-        # 投稿後にデータを削除（19:00の新規作成のため）
-        data['hackmd'] = None
-        data['connpass'] = None
-        save_data(data)
-        print('18:30投稿後にデータを削除しました')
+        try:
+            await channel.send(message)
+        except Exception as e:
+            print(f'18:30 投稿エラー: {e}')
+        finally:
+            # 投稿の成否に関わらずデータを削除（19:00の新規作成のため）
+            data['hackmd'] = None
+            data['connpass'] = None
+            save_data(data)
+            print('18:30投稿後にデータを削除しました')
 
 async def post_writing_time():
     """月曜 18:38 (JST) の投稿"""
