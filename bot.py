@@ -205,7 +205,7 @@ https://yamadashy.github.io/tech-blog-rss-feed/
 https://hatena.blog/dev
 https://techplay.jp/blog"""
 
-        await channel.send(message)
+        await channel.send(message, suppress_embeds=True)
         
         # 投稿後にデータを削除（19:00の新規作成のため）
         data['hackmd'] = None
@@ -277,7 +277,7 @@ async def post_create_hackmd():
 {hackmd_text}
 ※ connpass のリンクが未設定の場合は，set コマンドで connpass のリンクを設定してください．"""
 
-        await channel.send(message)
+        await channel.send(message, suppress_embeds=True)
 
 # connpass RSS 自動取得
 CONNPASS_RSS_URL = 'https://blogreading.connpass.com/ja.atom'
@@ -336,7 +336,7 @@ async def check_and_post_connpass():
             message = f"""次回 {date_str} 分
 {hackmd_url}
 {connpass_url}"""
-            await channel.send(message)
+            await channel.send(message, suppress_embeds=True)
             print('connpass 自動取得による投稿を行いました')
 
 # スラッシュコマンド
@@ -360,7 +360,7 @@ async def ls(interaction: discord.Interaction):
 HackMD: {hackmd_text}
 connpass: {connpass_text}"""
 
-    await interaction.response.send_message(message, ephemeral=True)
+    await interaction.response.send_message(message, ephemeral=True, suppress_embeds=True)
 
 @bot.tree.command(name="announce", description="次回の月曜日の情報をチャンネルに投稿します")
 async def announce(interaction: discord.Interaction):
@@ -397,7 +397,7 @@ async def announce(interaction: discord.Interaction):
     # チャンネルに投稿（ephemeralではない）
     channel = bot.get_channel(CHANNEL_ID)
     if channel:
-        await channel.send(message)
+        await channel.send(message, suppress_embeds=True)
         await interaction.response.send_message('✅ お知らせを投稿しました', ephemeral=True)
     else:
         await interaction.response.send_message('❌ チャンネルが見つかりません', ephemeral=True)
@@ -416,7 +416,7 @@ async def set_connpass(interaction: discord.Interaction, url: str):
     data = load_data()
     data['connpass'] = clean_url
     save_data(data)
-    await interaction.response.send_message(f'✅ connpass URL を設定しました: {clean_url}', ephemeral=True)
+    await interaction.response.send_message(f'✅ connpass URL を設定しました: {clean_url}', ephemeral=True, suppress_embeds=True)
 
 @bot.tree.command(name="set_hackmd", description="HackMD の URL を設定します")
 @app_commands.describe(url="HackMD メモの URL")
@@ -429,7 +429,7 @@ async def set_hackmd(interaction: discord.Interaction, url: str):
     data = load_data()
     data['hackmd'] = url
     save_data(data)
-    await interaction.response.send_message(f'✅ HackMD URL を設定しました: {url}', ephemeral=True)
+    await interaction.response.send_message(f'✅ HackMD URL を設定しました: {url}', ephemeral=True, suppress_embeds=True)
 
 @bot.tree.command(name="check_time", description="現在時刻とタイムゾーンを確認します")
 async def check_time(interaction: discord.Interaction):

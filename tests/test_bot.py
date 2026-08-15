@@ -323,6 +323,8 @@ async def test_post_start():
     call_args = mock_channel.send.call_args[0][0]
     assert 'https://hackmd.io/test' in call_args
     assert 'https://connpass.com/test' in call_args
+    # リンクを含む投稿は埋め込みを抑止する
+    assert mock_channel.send.call_args.kwargs.get('suppress_embeds') is True
 
 
 @pytest.mark.asyncio
@@ -370,6 +372,8 @@ async def test_post_create_hackmd():
     call_args = mock_channel.send.call_args[0][0]
     assert '01/08 (月)' in call_args
     assert hackmd_url in call_args
+    # リンクを含む投稿は埋め込みを抑止する
+    assert mock_channel.send.call_args.kwargs.get('suppress_embeds') is True
 
 
 # ========================================
@@ -507,6 +511,8 @@ async def test_check_and_post_connpass_found_and_post():
     assert '01/08(月)' in call_args
     assert 'https://hackmd.io/test' in call_args
     assert connpass_url in call_args
+    # リンクを含む投稿は埋め込みを抑止する
+    assert mock_channel.send.call_args.kwargs.get('suppress_embeds') is True
 
 
 @pytest.mark.asyncio
