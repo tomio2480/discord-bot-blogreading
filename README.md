@@ -129,6 +129,10 @@ Northflank の無料枠は常時起動が可能で，Discord bot に最適です
      - `DISCORD_TOKEN`: Discord Bot トークン
      - `DISCORD_CHANNEL_ID`: チャンネル ID
      - `HACKMD_API_TOKEN`: HackMD API トークン
+   - Google Sheets を使う場合は次の 2 つも追加します．
+     - `GOOGLE_SHEETS_CREDENTIALS`: サービスアカウントの認証情報
+     - `GOOGLE_SHEETS_SPREADSHEET_ID`: スプレッドシートの ID
+   - 詳細な手順は [GOOGLE_SHEETS_SETUP.md](GOOGLE_SHEETS_SETUP.md) を参照してください．
 
 5. **デプロイ**
    - "Deploy" をクリック
@@ -143,7 +147,7 @@ Northflank では再起動時にファイルが消えます．`data.json` は揮
 
 ## 技術スタック
 
-- Python 3.x
+- Python 3.11（Dockerfile の基底イメージ）
 - discord.py
 - APScheduler（JST スケジューリング）
 - HackMD API
