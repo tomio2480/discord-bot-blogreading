@@ -5,10 +5,13 @@ Discord Bot のテストコード
 TDDアプローチで、テストを先に作成してから実装を行う。
 """
 
+import asyncio
 import pytest
 import json
 import os
 import sys
+import threading
+import time as time_module
 from datetime import datetime, timedelta
 from unittest.mock import Mock, AsyncMock, patch, mock_open, MagicMock
 import pytz
@@ -60,6 +63,111 @@ def test_save_data():
     handle = m()
     written_data = ''.join(call.args[0] for call in handle.write.call_args_list)
     assert json.loads(written_data) == test_data
+
+
+# ========================================
+# 非同期ラッパー（aload_data / asave_data）のテスト
+# ========================================
+
+@pytest.mark.asyncio
+async def test_aload_data_runs_off_event_loop_thread():
+    """aload_data は load_data を別スレッドで実行し，その戻り値をそのまま返す"""
+    caller_thread_id = threading.get_ident()
+    called_thread_ids = []
+    expected = {'hackmd': 'https://hackmd.io/test', 'connpass': None}
+
+    def fake_load_data():
+        called_thread_ids.append(threading.get_ident())
+        return expected
+
+    with patch('bot.load_data', side_effect=fake_load_data):
+        result = await bot.aload_data()
+
+    assert result == expected
+    assert called_thread_ids == [called_thread_ids[0]]
+    assert called_thread_ids[0] != caller_thread_id
+
+
+@pytest.mark.asyncio
+async def test_asave_data_passes_data_and_runs_off_event_loop_thread():
+    """asave_data は受け取ったデータをそのまま save_data へ渡し，別スレッドで実行する"""
+    caller_thread_id = threading.get_ident()
+    called_thread_ids = []
+    received_data = []
+    test_data = {'hackmd': 'https://hackmd.io/test', 'connpass': None}
+
+    def fake_save_data(data):
+        called_thread_ids.append(threading.get_ident())
+        received_data.append(data)
+
+    with patch('bot.save_data', side_effect=fake_save_data):
+        await bot.asave_data(test_data)
+
+    assert received_data == [test_data]
+    assert called_thread_ids[0] != caller_thread_id
+
+
+@pytest.mark.asyncio
+async def test_aload_data_does_not_block_event_loop():
+    """load_data 内の time.sleep による待機中も，イベントループは他のコルーチンを進められる"""
+    event = threading.Event()
+    event_was_set_before_load_finished = []
+
+    def slow_load_data():
+        time_module.sleep(0.2)
+        event_was_set_before_load_finished.append(event.is_set())
+        return {'hackmd': None, 'connpass': None}
+
+    async def set_event_soon():
+        await asyncio.sleep(0.05)
+        event.set()
+
+    with patch('bot.load_data', side_effect=slow_load_data):
+        await asyncio.gather(bot.aload_data(), set_event_soon())
+
+    assert event_was_set_before_load_finished == [True]
+
+
+@pytest.mark.asyncio
+async def test_storage_lock_serializes_access():
+    """save_data の読み込みからキャッシュ書き込みまでは lock で直列化され，割り込まれない
+    （set_connpass と set_hackmd 等が重なっても互いの項目を消さないため）"""
+    in_progress = threading.Event()
+    overlap_detected = []
+
+    def slow_write_local(data, unsynced):
+        if in_progress.is_set():
+            overlap_detected.append(True)
+        in_progress.set()
+        time_module.sleep(0.05)
+        in_progress.clear()
+
+    with patch('bot.get_worksheet', return_value=None):
+        with patch('bot.load_local', return_value=({}, False)):
+            with patch('bot.write_local', side_effect=slow_write_local):
+                await asyncio.gather(
+                    bot.asave_data({'hackmd': 'H'}),
+                    bot.asave_data({'connpass': 'C'}),
+                )
+
+    assert overlap_detected == []
+
+
+@pytest.mark.asyncio
+async def test_concurrent_saves_do_not_lose_other_field(tmp_path):
+    """異なる項目の部分更新が同時に走っても，互いのフィールドを消さない"""
+    data_file = tmp_path / 'data.json'
+
+    with patch('bot.DATA_FILE', str(data_file)):
+        with patch('bot.get_worksheet', return_value=None):
+            await asyncio.gather(
+                bot.asave_data({'hackmd': 'H'}),
+                bot.asave_data({'connpass': 'C'}),
+            )
+
+    saved = json.loads(data_file.read_text(encoding='utf-8'))
+    assert saved['hackmd'] == 'H'
+    assert saved['connpass'] == 'C'
 
 
 # ========================================
@@ -251,6 +359,19 @@ async def test_ls_command_load_error():
 
 
 @pytest.mark.asyncio
+async def test_ls_command_loads_via_thread():
+    """/ls はデータ読み込みを aload_data（スレッド経由）で行う"""
+    mock_interaction = make_interaction('tomio2480')
+    test_data = {'hackmd': 'https://hackmd.io/test', 'connpass': 'https://connpass.com/test'}
+
+    with patch('bot.aload_data', AsyncMock(return_value=test_data)) as mock_aload:
+        with patch('bot.get_next_monday', return_value=datetime(2024, 1, 1, tzinfo=pytz.timezone('Asia/Tokyo'))):
+            await bot.ls.callback(mock_interaction)
+
+    mock_aload.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
 async def test_set_connpass_authorized():
     """connpass設定コマンド（クエリパラメータは取り除いて保存する）"""
     mock_interaction = make_interaction('tomio2480')
@@ -276,6 +397,37 @@ async def test_set_connpass_authorized():
 
 
 @pytest.mark.asyncio
+async def test_set_connpass_saves_via_thread():
+    """/set_connpass はデータ読み書きを aload_data / asave_data（スレッド経由）で行う"""
+    mock_interaction = make_interaction('tomio2480')
+    test_url = 'https://connpass.com/event/12345/?utm_source=x'
+    expected_url = 'https://connpass.com/event/12345/'
+
+    with patch('bot.aload_data', AsyncMock(return_value={'hackmd': None, 'connpass': None})):
+        with patch('bot.asave_data', AsyncMock()) as mock_asave:
+            await bot.set_connpass.callback(mock_interaction, test_url)
+
+    mock_asave.assert_awaited_once()
+    saved_data = mock_asave.call_args[0][0]
+    assert saved_data['connpass'] == expected_url
+
+
+@pytest.mark.asyncio
+async def test_set_connpass_saves_only_connpass():
+    """/set_connpass は変更した connpass だけを部分更新で保存し，hackmd を巻き込まない
+    （/set_hackmd や RSS ジョブとの同時実行で相手の更新を巻き戻さないため）"""
+    mock_interaction = make_interaction('tomio2480')
+    test_url = 'https://connpass.com/event/12345/?utm_source=x'
+    expected_url = 'https://connpass.com/event/12345/'
+
+    with patch('bot.aload_data', AsyncMock(return_value={'hackmd': 'https://hackmd.io/keep', 'connpass': None})):
+        with patch('bot.asave_data', AsyncMock()) as mock_asave:
+            await bot.set_connpass.callback(mock_interaction, test_url)
+
+    mock_asave.assert_awaited_once_with({'connpass': expected_url})
+
+
+@pytest.mark.asyncio
 async def test_set_hackmd_authorized():
     """HackMD設定コマンド"""
     mock_interaction = make_interaction('tomio2480')
@@ -297,6 +449,19 @@ async def test_set_hackmd_authorized():
     call_args = mock_interaction.followup.send.call_args
     assert call_args[1]['ephemeral'] is True
     assert call_args[1]['suppress_embeds'] is True
+
+
+@pytest.mark.asyncio
+async def test_set_hackmd_saves_only_hackmd():
+    """/set_hackmd は変更した hackmd だけを部分更新で保存し，connpass を巻き込まない"""
+    mock_interaction = make_interaction('tomio2480')
+    test_url = 'https://hackmd.io/test123'
+
+    with patch('bot.aload_data', AsyncMock(return_value={'hackmd': None, 'connpass': 'https://connpass.com/keep'})):
+        with patch('bot.asave_data', AsyncMock()) as mock_asave:
+            await bot.set_hackmd.callback(mock_interaction, test_url)
+
+    mock_asave.assert_awaited_once_with({'hackmd': test_url})
 
 
 # ========================================
@@ -892,3 +1057,21 @@ async def test_post_start_clears_data_even_if_send_fails():
     saved_data = mock_save.call_args[0][0]
     assert saved_data['hackmd'] is None
     assert saved_data['connpass'] is None
+
+
+@pytest.mark.asyncio
+async def test_post_start_clears_both_links():
+    """18:30 投稿後は hackmd・connpass の両方を None として部分更新で保存する
+    （19:00 の新規作成に備えた意図的な消去．辞書全体ではなく明示的な 2 項目のみ渡す）"""
+    mock_channel = AsyncMock()
+    test_data = {
+        'hackmd': 'https://hackmd.io/test',
+        'connpass': 'https://connpass.com/test'
+    }
+
+    with patch.object(bot.bot, 'get_channel', return_value=mock_channel):
+        with patch('bot.aload_data', AsyncMock(return_value=test_data)):
+            with patch('bot.asave_data', AsyncMock()) as mock_asave:
+                await bot.post_start()
+
+    mock_asave.assert_awaited_once_with({'hackmd': None, 'connpass': None})

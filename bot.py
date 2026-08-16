@@ -10,6 +10,8 @@ import os
 import json
 import re
 import time
+import asyncio
+import threading
 import requests
 import feedparser
 from dotenv import load_dotenv
@@ -118,53 +120,68 @@ def write_local(data, unsynced):
     with open(DATA_FILE, 'w', encoding='utf-8') as f:
         json.dump({**data, UNSYNCED_KEY: True} if unsynced else data, f, ensure_ascii=False, indent=2)
 
+# ストレージの読み書きを直列化する．asyncio.to_thread により複数スレッドから
+# 同時に呼ばれうるため，読み込みからキャッシュ書き込みまでの間に割り込ませない．
+# load_data が内部で save_data を呼ぶ再同期経路があるため RLock を使う
+_storage_lock = threading.RLock()
+
 def load_data():
     """データを読み込む．
     Google Sheets 設定時は Sheets を正とし，再試行しても読めなければローカルキャッシュを返す．
     キャッシュも無ければ None を返す（既定値を返すと後続の保存で hackmd が消えるため）．
     未同期の印が付いたキャッシュがあればそれを正とし，Sheets へ再同期する．
     """
-    cached, unsynced = load_local()
-    if unsynced and cached is not None:
-        print('未同期のローカルキャッシュを Google Sheets へ再同期します')
-        save_data(cached)
-        return cached
-    try:
-        data = with_retry(read_sheet, 'Google Sheets 読み込み')
-    except Exception:
-        return cached
-    if data is not None:
-        # 読み込めた最新値でキャッシュを更新する（古いキャッシュが後の再同期で正になるのを防ぐ）
+    with _storage_lock:
+        cached, unsynced = load_local()
+        if unsynced and cached is not None:
+            print('未同期のローカルキャッシュを Google Sheets へ再同期します')
+            save_data(cached)
+            return cached
         try:
-            write_local(data, unsynced=False)
-        except Exception as e:
-            print(f'ローカルファイルへのデータ保存エラー: {e}')
-        return data
-    return cached if cached is not None else dict(DEFAULT_DATA)
+            data = with_retry(read_sheet, 'Google Sheets 読み込み')
+        except Exception:
+            return cached
+        if data is not None:
+            # 読み込めた最新値でキャッシュを更新する（古いキャッシュが後の再同期で正になるのを防ぐ）
+            try:
+                write_local(data, unsynced=False)
+            except Exception as e:
+                print(f'ローカルファイルへのデータ保存エラー: {e}')
+            return data
+        return cached if cached is not None else dict(DEFAULT_DATA)
 
 def save_data(data):
     """Google Sheets とローカルキャッシュにデータを保存する．data は一部の項目だけでもよい．
     Sheets へは渡された項目だけ書き，ローカルには既存キャッシュと統合した全項目を書く．
     """
-    cached, was_unsynced = load_local()
-    merged = {**(cached or {}), **data}
-    # 未同期のキャッシュがあれば，その内容ごと Sheets へ書き戻す
-    payload = merged if was_unsynced else data
+    with _storage_lock:
+        cached, was_unsynced = load_local()
+        merged = {**(cached or {}), **data}
+        # 未同期のキャッシュがあれば，その内容ごと Sheets へ書き戻す
+        payload = merged if was_unsynced else data
 
-    synced = True
-    try:
-        if with_retry(lambda: write_sheet(payload), 'Google Sheets 保存'):
-            print(f'Google Sheetsにデータを保存しました: {payload}')
-    except Exception:
-        synced = False
-        print('Google Sheets への保存に失敗しました．ローカルキャッシュのみ更新し，次回の読み込み時に再同期します')
+        synced = True
+        try:
+            if with_retry(lambda: write_sheet(payload), 'Google Sheets 保存'):
+                print(f'Google Sheetsにデータを保存しました: {payload}')
+        except Exception:
+            synced = False
+            print('Google Sheets への保存に失敗しました．ローカルキャッシュのみ更新し，次回の読み込み時に再同期します')
 
-    # ローカルキャッシュは常に更新する（Sheets 障害時のフォールバック兼再同期の元データ）
-    try:
-        write_local(merged, unsynced=not synced)
-        print(f'ローカルファイルにデータを保存しました: {merged}')
-    except Exception as e:
-        print(f'ローカルファイルへのデータ保存エラー: {e}')
+        # ローカルキャッシュは常に更新する（Sheets 障害時のフォールバック兼再同期の元データ）
+        try:
+            write_local(merged, unsynced=not synced)
+            print(f'ローカルファイルにデータを保存しました: {merged}')
+        except Exception as e:
+            print(f'ローカルファイルへのデータ保存エラー: {e}')
+
+async def aload_data():
+    """load_data をスレッドで実行する．再試行の待機中もイベントループを止めない"""
+    return await asyncio.to_thread(load_data)
+
+async def asave_data(data):
+    """save_data をスレッドで実行する．再試行の待機中もイベントループを止めない"""
+    return await asyncio.to_thread(save_data, data)
 
 def get_next_monday():
     """次の月曜日の日付を取得"""
@@ -232,7 +249,7 @@ async def post_start():
     channel = bot.get_channel(CHANNEL_ID)
     if channel:
         # 読み込めない場合も投稿は行い，投稿後のクリアで状態を確定させる
-        data = load_data() or dict(DEFAULT_DATA)
+        data = await aload_data() or dict(DEFAULT_DATA)
         now = datetime.now(JST)
         date_str = now.strftime('%m/%d(月)')
 
@@ -254,9 +271,7 @@ https://techplay.jp/blog"""
             print(f'18:30 投稿エラー: {e}')
         finally:
             # 投稿の成否に関わらずデータを削除（19:00の新規作成のため）
-            data['hackmd'] = None
-            data['connpass'] = None
-            save_data(data)
+            await asave_data({'hackmd': None, 'connpass': None})
             print('18:30投稿後にデータを削除しました')
 
 async def post_writing_time():
@@ -294,18 +309,20 @@ async def post_create_hackmd():
 
         # データ保存（読み込めない場合も作成した HackMD URL は必ず保存する）
         # 読み込めない場合は判明した項目だけ書き，Sheets 上の他の項目（connpass 等）は保持する
-        data = load_data() or {}
+        data = await aload_data() or {}
         if hackmd_url:
             data['hackmd'] = hackmd_url
+            updates = {'hackmd': hackmd_url}
 
             # connpass URL が未設定の場合、RSS から自動取得を試みる
             if not data.get('connpass'):
                 connpass_url = check_connpass_rss()
                 if connpass_url:
                     data['connpass'] = connpass_url
+                    updates['connpass'] = connpass_url
                     print(f'connpass URL を自動設定しました: {connpass_url}')
 
-            save_data(data)
+            await asave_data(updates)
 
         # 投稿
         date_str = next_monday.strftime('%m/%d (月)')
@@ -356,7 +373,7 @@ def check_connpass_rss():
 
 async def check_and_post_connpass():
     """connpass URL が未設定の場合、RSS をチェックして自動投稿"""
-    data = load_data()
+    data = await aload_data()
 
     # 読み込めない場合は何もしない（既定値で保存すると hackmd が消えるため）
     # connpass URL が設定済みの場合はスキップ
@@ -370,7 +387,7 @@ async def check_and_post_connpass():
 
     # connpass URL を保存
     data['connpass'] = connpass_url
-    save_data(data)
+    await asave_data({'connpass': connpass_url})
     print(f'connpass URL を自動設定しました: {connpass_url}')
 
     # /announce と同じ内容を投稿
@@ -404,7 +421,7 @@ async def ls(interaction: discord.Interaction):
     date_str = next_monday.strftime('%m/%d (月)')
 
     # 現在の設定を読み込み
-    data = load_data()
+    data = await aload_data()
     if data is None:
         await interaction.followup.send(LOAD_ERROR_MESSAGE, ephemeral=True)
         return
@@ -432,7 +449,7 @@ async def announce(interaction: discord.Interaction):
     date_str = next_monday.strftime('%m/%d(月)')
 
     # 現在の設定を読み込み
-    data = load_data()
+    data = await aload_data()
     if data is None:
         await interaction.followup.send(LOAD_ERROR_MESSAGE, ephemeral=True)
         return
@@ -477,12 +494,11 @@ async def set_connpass(interaction: discord.Interaction, url: str):
     # URLから ? 以降のパラメータを削除
     clean_url = url.split('?')[0]
 
-    data = load_data()
+    data = await aload_data()
     if data is None:
         await interaction.followup.send(LOAD_ERROR_MESSAGE, ephemeral=True)
         return
-    data['connpass'] = clean_url
-    save_data(data)
+    await asave_data({'connpass': clean_url})
     await interaction.followup.send(f'✅ connpass URL を設定しました: {clean_url}', ephemeral=True, suppress_embeds=True)
 
 @bot.tree.command(name="set_hackmd", description="HackMD の URL を設定します")
@@ -496,12 +512,11 @@ async def set_hackmd(interaction: discord.Interaction, url: str):
     # データ読み書き（再試行あり）が 3 秒の応答期限を超えうるため先に defer する
     await interaction.response.defer(ephemeral=True)
 
-    data = load_data()
+    data = await aload_data()
     if data is None:
         await interaction.followup.send(LOAD_ERROR_MESSAGE, ephemeral=True)
         return
-    data['hackmd'] = url
-    save_data(data)
+    await asave_data({'hackmd': url})
     await interaction.followup.send(f'✅ HackMD URL を設定しました: {url}', ephemeral=True, suppress_embeds=True)
 
 @bot.tree.command(name="check_time", description="現在時刻とタイムゾーンを確認します")
