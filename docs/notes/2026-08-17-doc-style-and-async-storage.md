@@ -17,8 +17,8 @@ Sheets 呼び出しの非同期化を扱った．
 ## 🔍 Codex の P1 指摘をコード修正で受けなかった理由
 
 PR #16 に対し Codex は次を指摘した．
-18:30 の `post_start()` は Sheets 障害かつキャッシュ無しの状況でも
-`None` を `save_data()` へ渡すため，`_unsynced` 経由で Sheets の値を消しうる．
+Sheets 障害かつキャッシュ無しの状況でも，18:30 の `post_start()` は
+`None` を `save_data()` へ渡す．`_unsynced` 経由で Sheets の値を消しうる．
 `CLAUDE.md` に書いた「呼び出し側は既定値で上書き保存しない」と矛盾する，という内容である．
 
 指摘の事実関係は正しい．ただし 18:30 の消去は 19:00 の新規作成に備えた設計であり，
@@ -30,12 +30,14 @@ Bot レビューは実装の一貫性を見るため，仕様上の例外を漏�
 
 ## 🧭 文体は場所ではなく読み手で決める
 
-`README.md` と `GOOGLE_SHEETS_SETUP.md` は，textlint の既定である「である調」に
-合わせるのではなく，ですます調のまま残した．どちらも利用者が手順どおりに
-操作するための文書であり，読み手へ呼びかける性質を持つためである．
+`README.md` と `GOOGLE_SHEETS_SETUP.md` は，ですます調のまま残した．
+textlint の既定である「である調」には合わせていない．
+どちらも利用者が手順どおりに操作するための文書である．
+読み手へ呼びかける性質を持つためである．
 
-textlint の指摘は `ja-technical-writing/no-mix-dearu-desumasu` の 1 ルールだけを
-ファイル先頭のコメントで無効化して止めた．`.textlintignore` は使わない．
+textlint の指摘は 1 ルールだけ無効化して止めた．
+対象は `ja-technical-writing/no-mix-dearu-desumasu` である．
+無効化はファイル先頭のコメントで宣言する．`.textlintignore` は使わない．
 ファイルごと除外すると，文長・助詞重複・表記ゆれの検査まで効かなくなる．
 
 選んだ文体は `CLAUDE.md` に 1 行残した．後から来た者が同じ判断を繰り返さずに済む．
@@ -43,7 +45,7 @@ textlint の指摘は `ja-technical-writing/no-mix-dearu-desumasu` の 1 ルー�
 ## ✂️ 体裁の修正が内容を書き換えることがある
 
 句読点とスペースの統一を委譲した結果，助詞の重複を避ける言い換えの過程で
-内容が変わった箇所が 5 件あった．表 1 に示す．
+内容の変わった箇所が 5 件あった．表 1 に示す．
 
 表 1. 体裁の修正に紛れて内容が変わった箇所
 
@@ -72,21 +74,24 @@ textlint の指摘は `ja-technical-writing/no-mix-dearu-desumasu` の 1 ルー�
 このためスラッシュコマンドのテスト 4 件が skip のまま残っていた．
 discord.py 2.7.1 では差し替えなしで import できるため，モックを外して有効化した．
 
-有効化にあたり，デコレータ適用後の関数は `app_commands.Command` になる点に注意する．
-`await bot.ls(interaction)` は `TypeError` になるため，`bot.ls.callback(interaction)` で
-元のコルーチンを呼ぶ．
+有効化では注意すべき点がある．
+デコレータ適用後の関数は `app_commands.Command` になる．
+`await bot.ls(interaction)` は `TypeError` になる．
+元のコルーチンは `bot.ls.callback(interaction)` で呼ぶ．
 
-旧テストは `response.send_message` を検証していたが，現行実装は 3 秒制限対策で
-`response.defer()` → `followup.send()` の順に呼ぶ．skip されたテストは実装の変化に
-追随しないため，有効化の際は検証対象そのものを見直す必要がある．
+旧テストは `response.send_message` を検証していた．
+現行実装は 3 秒制限対策で `response.defer()` → `followup.send()` の順に呼ぶ．
+skip されたテストは実装の変化に追随しない．
+有効化の際は検証対象そのものを見直す．
 
 ## ⏱ 同期処理をイベントループから逃がす
 
 Sheets の再試行は同期の `time.sleep` で待つ．最大 3 回・2 秒間隔のため，
 障害時は最大 4 秒ほどイベントループが止まる．ハートビートと他コマンドが巻き込まれる．
 
-`load_data` / `save_data` は同期のまま残し，`asyncio.to_thread` で包む
-`aload_data` / `asave_data` を追加して，非同期側の呼び出しだけを置き換えた．
+`load_data` / `save_data` は同期のまま残した．
+`asyncio.to_thread` で包む `aload_data` / `asave_data` を追加した．
+置き換えたのは非同期側の呼び出しだけである．
 同期版を残したのは，`load_data` が内部で `save_data` を呼ぶ再同期経路があるためである．
 両方を非同期化すると，同期文脈から呼べなくなる．
 
@@ -101,7 +106,7 @@ Sheets の再試行は同期の `time.sleep` で待つ．最大 3 回・2 秒間
 - Python 3.13 では `audioop` が標準ライブラリから外れた．
   discord.py 2.3.2 は import に失敗する．2.7.1 は対応済みである．
 - CI の完了待ちループは，チェックがまだ登録されていない時点で
-  「pending が無い」と判定して即座に抜ける．
+  pending が無いと判定して即座に抜ける．
   チェック件数の下限も条件に入れる．
 - 複数の独立タスクは worktree 分離のサブエージェントへ並行委譲できる．
   ただし同じファイルを触るタスクは分けない．今回は `CLAUDE.md` を 3 ブランチが
