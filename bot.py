@@ -128,10 +128,12 @@ def save_data(data):
     global sheets_dirty
     # ローカルファイルに常に保存（Sheets 障害時のキャッシュとして使う）
     # ローカル書き込みが失敗しても Google Sheets への保存は継続する
+    local_saved = False
     try:
         os.makedirs(os.path.dirname(DATA_FILE) if os.path.dirname(DATA_FILE) else '.', exist_ok=True)
         with open(DATA_FILE, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+        local_saved = True
     except Exception as e:
         print(f'ローカルファイルへのデータ保存エラー: {e}')
 
@@ -141,8 +143,12 @@ def save_data(data):
             print(f'Google Sheetsにデータを保存しました: {data}')
             return
     except Exception:
-        sheets_dirty = True
-        print('Google Sheets への保存に失敗しました．ローカルファイルのみ更新し，次回の読み込み時に再同期します')
+        # ローカルに今回の値が書けている場合のみ，ローカルを正として再同期対象にする
+        if local_saved:
+            sheets_dirty = True
+            print('Google Sheets への保存に失敗しました．ローカルファイルのみ更新し，次回の読み込み時に再同期します')
+        else:
+            print('Google Sheets とローカルファイルの両方への保存に失敗しました')
         return
 
     print(f'ローカルファイルにデータを保存しました: {data}')
@@ -376,6 +382,9 @@ async def ls(interaction: discord.Interaction):
         await interaction.response.send_message('❌ このコマンドを実行する権限がありません', ephemeral=True)
         return
 
+    # データ読み込み（再試行あり）が 3 秒の応答期限を超えうるため先に defer する
+    await interaction.response.defer(ephemeral=True)
+
     # 次の月曜日の日付を取得
     next_monday = get_next_monday()
     date_str = next_monday.strftime('%m/%d (月)')
@@ -383,7 +392,7 @@ async def ls(interaction: discord.Interaction):
     # 現在の設定を読み込み
     data = load_data()
     if data is None:
-        await interaction.response.send_message(LOAD_ERROR_MESSAGE, ephemeral=True)
+        await interaction.followup.send(LOAD_ERROR_MESSAGE, ephemeral=True)
         return
     hackmd_text = data.get('hackmd') or '（HackMD 未設定）'
     connpass_text = data.get('connpass') or '（connpass 未設定）'
@@ -392,7 +401,7 @@ async def ls(interaction: discord.Interaction):
 HackMD: {hackmd_text}
 connpass: {connpass_text}"""
 
-    await interaction.response.send_message(message, ephemeral=True, suppress_embeds=True)
+    await interaction.followup.send(message, ephemeral=True, suppress_embeds=True)
 
 @bot.tree.command(name="announce", description="次回の月曜日の情報をチャンネルに投稿します")
 async def announce(interaction: discord.Interaction):
@@ -401,6 +410,9 @@ async def announce(interaction: discord.Interaction):
         await interaction.response.send_message('❌ このコマンドを実行する権限がありません', ephemeral=True)
         return
 
+    # データ読み込み（再試行あり）が 3 秒の応答期限を超えうるため先に defer する
+    await interaction.response.defer(ephemeral=True)
+
     # 次の月曜日の日付を取得
     next_monday = get_next_monday()
     date_str = next_monday.strftime('%m/%d(月)')
@@ -408,7 +420,7 @@ async def announce(interaction: discord.Interaction):
     # 現在の設定を読み込み
     data = load_data()
     if data is None:
-        await interaction.response.send_message(LOAD_ERROR_MESSAGE, ephemeral=True)
+        await interaction.followup.send(LOAD_ERROR_MESSAGE, ephemeral=True)
         return
     hackmd_url = data.get('hackmd')
     connpass_url = data.get('connpass')
@@ -420,9 +432,9 @@ async def announce(interaction: discord.Interaction):
             missing.append('HackMD')
         if not connpass_url:
             missing.append('connpass')
-        
+
         warning = f"⚠️ {' と '.join(missing)} の URL が設定されていません。\n先に `/set_hackmd` と `/set_connpass` で URL を設定してください。"
-        await interaction.response.send_message(warning, ephemeral=True)
+        await interaction.followup.send(warning, ephemeral=True)
         return
 
     message = f"""次回 {date_str} 分
@@ -433,9 +445,9 @@ async def announce(interaction: discord.Interaction):
     channel = bot.get_channel(CHANNEL_ID)
     if channel:
         await channel.send(message, suppress_embeds=True)
-        await interaction.response.send_message('✅ お知らせを投稿しました', ephemeral=True)
+        await interaction.followup.send('✅ お知らせを投稿しました', ephemeral=True)
     else:
-        await interaction.response.send_message('❌ チャンネルが見つかりません', ephemeral=True)
+        await interaction.followup.send('❌ チャンネルが見つかりません', ephemeral=True)
 
 @bot.tree.command(name="set_connpass", description="connpass の URL を設定します")
 @app_commands.describe(url="connpass イベントの URL")
@@ -445,16 +457,19 @@ async def set_connpass(interaction: discord.Interaction, url: str):
         await interaction.response.send_message('❌ このコマンドを実行する権限がありません', ephemeral=True)
         return
 
+    # データ読み書き（再試行あり）が 3 秒の応答期限を超えうるため先に defer する
+    await interaction.response.defer(ephemeral=True)
+
     # URLから ? 以降のパラメータを削除
     clean_url = url.split('?')[0]
 
     data = load_data()
     if data is None:
-        await interaction.response.send_message(LOAD_ERROR_MESSAGE, ephemeral=True)
+        await interaction.followup.send(LOAD_ERROR_MESSAGE, ephemeral=True)
         return
     data['connpass'] = clean_url
     save_data(data)
-    await interaction.response.send_message(f'✅ connpass URL を設定しました: {clean_url}', ephemeral=True, suppress_embeds=True)
+    await interaction.followup.send(f'✅ connpass URL を設定しました: {clean_url}', ephemeral=True, suppress_embeds=True)
 
 @bot.tree.command(name="set_hackmd", description="HackMD の URL を設定します")
 @app_commands.describe(url="HackMD メモの URL")
@@ -464,13 +479,16 @@ async def set_hackmd(interaction: discord.Interaction, url: str):
         await interaction.response.send_message('❌ このコマンドを実行する権限がありません', ephemeral=True)
         return
 
+    # データ読み書き（再試行あり）が 3 秒の応答期限を超えうるため先に defer する
+    await interaction.response.defer(ephemeral=True)
+
     data = load_data()
     if data is None:
-        await interaction.response.send_message(LOAD_ERROR_MESSAGE, ephemeral=True)
+        await interaction.followup.send(LOAD_ERROR_MESSAGE, ephemeral=True)
         return
     data['hackmd'] = url
     save_data(data)
-    await interaction.response.send_message(f'✅ HackMD URL を設定しました: {url}', ephemeral=True, suppress_embeds=True)
+    await interaction.followup.send(f'✅ HackMD URL を設定しました: {url}', ephemeral=True, suppress_embeds=True)
 
 @bot.tree.command(name="check_time", description="現在時刻とタイムゾーンを確認します")
 async def check_time(interaction: discord.Interaction):

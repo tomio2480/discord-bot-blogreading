@@ -671,6 +671,17 @@ def test_load_data_resyncs_local_cache_after_failed_sheets_save():
         assert bot.sheets_dirty is False
 
 
+def test_save_data_does_not_mark_dirty_when_local_write_fails():
+    """ローカル書き込みも Sheets 保存も失敗した場合，古いキャッシュを正にしないよう未同期フラグは立てない"""
+    with patch.object(bot, 'sheets_dirty', False):
+        with patch('bot.get_worksheet', side_effect=Exception('down')):
+            with patch('bot.time.sleep'):
+                with patch('builtins.open', side_effect=OSError('read-only')):
+                    bot.save_data({'hackmd': 'https://hackmd.io/new', 'connpass': None})
+
+        assert bot.sheets_dirty is False
+
+
 def test_load_data_keeps_dirty_when_resync_fails():
     """再同期にも失敗した場合はローカルキャッシュを返し，未同期のままにする"""
     newer = {'hackmd': 'https://hackmd.io/new', 'connpass': None}
