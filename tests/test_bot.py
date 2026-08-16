@@ -567,6 +567,21 @@ def test_save_data_local_file_has_cleared_data_after_google_sheets_save():
     assert saved['connpass'] is None
 
 
+def test_save_data_local_write_failure_does_not_skip_google_sheets():
+    """ローカル書き込みが失敗しても Google Sheets への保存は実行されることを確認"""
+    test_data = {'hackmd': 'https://hackmd.io/test', 'connpass': None}
+
+    mock_worksheet = MagicMock()
+
+    with patch('bot.get_worksheet', return_value=mock_worksheet):
+        with patch('builtins.open', side_effect=OSError('read-only file system')):
+            bot.save_data(test_data)
+
+    # ローカル失敗に関わらず Google Sheets へ保存される
+    mock_worksheet.clear.assert_called_once()
+    assert mock_worksheet.update.call_count == 2
+
+
 # ========================================
 # post_start データクリアの堅牢性テスト
 # ========================================

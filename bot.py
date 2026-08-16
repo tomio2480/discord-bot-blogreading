@@ -100,9 +100,13 @@ def load_data():
 def save_data(data):
     """Google Sheetsとローカルファイルの両方にデータを保存"""
     # ローカルファイルに常に保存（フォールバック時の整合性を保証）
-    os.makedirs(os.path.dirname(DATA_FILE) if os.path.dirname(DATA_FILE) else '.', exist_ok=True)
-    with open(DATA_FILE, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    # ローカル書き込みが失敗しても Google Sheets への保存は継続する
+    try:
+        os.makedirs(os.path.dirname(DATA_FILE) if os.path.dirname(DATA_FILE) else '.', exist_ok=True)
+        with open(DATA_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f'ローカルファイルへのデータ保存エラー: {e}')
 
     try:
         worksheet = get_worksheet()
