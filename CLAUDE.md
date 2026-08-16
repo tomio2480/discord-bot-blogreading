@@ -1,6 +1,9 @@
 # CLAUDE.md
 
+<!-- 冒頭の英文は Claude Code の定型文のため，この 1 行だけ文長制限を無効化する． -->
+<!-- textlint-disable ja-technical-writing/sentence-length -->
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+<!-- textlint-enable ja-technical-writing/sentence-length -->
 
 ## ドキュメントの文体
 
@@ -52,7 +55,7 @@ cp .env.example .env
 ### 重要な実装詳細
 
 - `get_next_monday()`: 次の月曜日を計算（JST 基準）
-- 日付フォーマット: `%Y`=4桁年, `%m`=2桁月, `%d`=2桁日
+- 日付フォーマット: `%Y`=4 桁年, `%m`=2 桁月, `%d`=2 桁日
 - HackMD 権限: `readPermission` と `writePermission` を `signed_in` に設定
 - スケジュール時刻のズレは ±1 分程度を許容
 - リンクを含む投稿・応答は `suppress_embeds=True` で埋め込みを抑止
@@ -71,7 +74,7 @@ Docker でデプロイ．Vercel 等の Serverless 環境は不可（常時接続
 ---
 
 # 制作するもの
-- Discord サーバ－「とみおハウス」で動作する Discord bot を作成する．
+- Discord サーバー「とみおハウス」で動作する Discord bot を作成する．
 - 時刻に応じて以下の処理を行う．
   - 月曜 08:00 (JST) になったら「📢 今日はブログを読む日です」と #blogreading に投稿する．
   - 月曜 18:15 (JST) になったら「👀 テックブログ一気読み選手権まであと少し」と #blogreading に投稿する．
@@ -97,8 +100,8 @@ https://techplay.jp/blog
       - このとき，共有 URL の末尾は "blogread_yyyyMMdd" とする．
         - また，yyyy は次の月曜日の西暦年，MM は次の月曜日の月，dd は次の月曜日の日付を埋め込む．
         - URL 末尾例 : "blogread_20251124"
-      - できあがった HackMD メモの共有用リンクを set hackmd で保管する．
-        - なお，この処理の一連の流れで，ユーザーに明示せず，内部的に set hackmd と同様の動作をしてしまってよい．
+      - できあがった HackMD メモの共有用リンクを `set hackmd` で保管する．
+        - なお，この処理の一連の流れで，ユーザーに明示せず，内部的に `set hackmd` と同様の動作をしてしまってよい．
   - 月曜 19:00 (JST) の処理が済んだら，以下のテキストを投稿する．
 ```
 MM/DD (月) 分
@@ -106,9 +109,9 @@ MM/DD (月) 分
 ※ connpass のリンクが未設定の場合は，set コマンドで connpass のリンクを設定してください．
 ```
 - 受け取ったコマンドに応じて以下の処理を行う．
-  - set connpass [URL]
+  - `set connpass [URL]`
     - connpass の URL を受け取って，次に出力する際のデータとして保管しておく．
-  - set hackmd [URL]
+  - `set hackmd [URL]`
     - hackmd の URL を受け取って，次に出力する際のデータとして保管しておく．
 
 # 動作環境と開発制約
