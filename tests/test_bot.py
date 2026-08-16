@@ -5,10 +5,13 @@ Discord Bot のテストコード
 TDDアプローチで、テストを先に作成してから実装を行う。
 """
 
+import asyncio
 import pytest
 import json
 import os
 import sys
+import threading
+import time as time_module
 from datetime import datetime, timedelta
 from unittest.mock import Mock, AsyncMock, patch, mock_open, MagicMock
 import pytz
@@ -60,6 +63,69 @@ def test_save_data():
     handle = m()
     written_data = ''.join(call.args[0] for call in handle.write.call_args_list)
     assert json.loads(written_data) == test_data
+
+
+# ========================================
+# 非同期ラッパー（aload_data / asave_data）のテスト
+# ========================================
+
+@pytest.mark.asyncio
+async def test_aload_data_runs_off_event_loop_thread():
+    """aload_data は load_data を別スレッドで実行し，その戻り値をそのまま返す"""
+    caller_thread_id = threading.get_ident()
+    called_thread_ids = []
+    expected = {'hackmd': 'https://hackmd.io/test', 'connpass': None}
+
+    def fake_load_data():
+        called_thread_ids.append(threading.get_ident())
+        return expected
+
+    with patch('bot.load_data', side_effect=fake_load_data):
+        result = await bot.aload_data()
+
+    assert result == expected
+    assert called_thread_ids == [called_thread_ids[0]]
+    assert called_thread_ids[0] != caller_thread_id
+
+
+@pytest.mark.asyncio
+async def test_asave_data_passes_data_and_runs_off_event_loop_thread():
+    """asave_data は受け取ったデータをそのまま save_data へ渡し，別スレッドで実行する"""
+    caller_thread_id = threading.get_ident()
+    called_thread_ids = []
+    received_data = []
+    test_data = {'hackmd': 'https://hackmd.io/test', 'connpass': None}
+
+    def fake_save_data(data):
+        called_thread_ids.append(threading.get_ident())
+        received_data.append(data)
+
+    with patch('bot.save_data', side_effect=fake_save_data):
+        await bot.asave_data(test_data)
+
+    assert received_data == [test_data]
+    assert called_thread_ids[0] != caller_thread_id
+
+
+@pytest.mark.asyncio
+async def test_aload_data_does_not_block_event_loop():
+    """load_data 内の time.sleep による待機中も，イベントループは他のコルーチンを進められる"""
+    event = threading.Event()
+    event_was_set_before_load_finished = []
+
+    def slow_load_data():
+        time_module.sleep(0.2)
+        event_was_set_before_load_finished.append(event.is_set())
+        return {'hackmd': None, 'connpass': None}
+
+    async def set_event_soon():
+        await asyncio.sleep(0.05)
+        event.set()
+
+    with patch('bot.load_data', side_effect=slow_load_data):
+        await asyncio.gather(bot.aload_data(), set_event_soon())
+
+    assert event_was_set_before_load_finished == [True]
 
 
 # ========================================
@@ -251,6 +317,19 @@ async def test_ls_command_load_error():
 
 
 @pytest.mark.asyncio
+async def test_ls_command_loads_via_thread():
+    """/ls はデータ読み込みを aload_data（スレッド経由）で行う"""
+    mock_interaction = make_interaction('tomio2480')
+    test_data = {'hackmd': 'https://hackmd.io/test', 'connpass': 'https://connpass.com/test'}
+
+    with patch('bot.aload_data', AsyncMock(return_value=test_data)) as mock_aload:
+        with patch('bot.get_next_monday', return_value=datetime(2024, 1, 1, tzinfo=pytz.timezone('Asia/Tokyo'))):
+            await bot.ls.callback(mock_interaction)
+
+    mock_aload.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
 async def test_set_connpass_authorized():
     """connpass設定コマンド（クエリパラメータは取り除いて保存する）"""
     mock_interaction = make_interaction('tomio2480')
@@ -273,6 +352,22 @@ async def test_set_connpass_authorized():
     call_args = mock_interaction.followup.send.call_args
     assert call_args[1]['ephemeral'] is True
     assert call_args[1]['suppress_embeds'] is True
+
+
+@pytest.mark.asyncio
+async def test_set_connpass_saves_via_thread():
+    """/set_connpass はデータ読み書きを aload_data / asave_data（スレッド経由）で行う"""
+    mock_interaction = make_interaction('tomio2480')
+    test_url = 'https://connpass.com/event/12345/?utm_source=x'
+    expected_url = 'https://connpass.com/event/12345/'
+
+    with patch('bot.aload_data', AsyncMock(return_value={'hackmd': None, 'connpass': None})):
+        with patch('bot.asave_data', AsyncMock()) as mock_asave:
+            await bot.set_connpass.callback(mock_interaction, test_url)
+
+    mock_asave.assert_awaited_once()
+    saved_data = mock_asave.call_args[0][0]
+    assert saved_data['connpass'] == expected_url
 
 
 @pytest.mark.asyncio

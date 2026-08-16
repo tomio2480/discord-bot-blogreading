@@ -10,6 +10,7 @@ import os
 import json
 import re
 import time
+import asyncio
 import requests
 import feedparser
 from dotenv import load_dotenv
@@ -166,6 +167,14 @@ def save_data(data):
     except Exception as e:
         print(f'ローカルファイルへのデータ保存エラー: {e}')
 
+async def aload_data():
+    """load_data をスレッドで実行する．再試行の待機中もイベントループを止めない"""
+    return await asyncio.to_thread(load_data)
+
+async def asave_data(data):
+    """save_data をスレッドで実行する．再試行の待機中もイベントループを止めない"""
+    return await asyncio.to_thread(save_data, data)
+
 def get_next_monday():
     """次の月曜日の日付を取得"""
     now = datetime.now(JST)
@@ -232,7 +241,7 @@ async def post_start():
     channel = bot.get_channel(CHANNEL_ID)
     if channel:
         # 読み込めない場合も投稿は行い，投稿後のクリアで状態を確定させる
-        data = load_data() or dict(DEFAULT_DATA)
+        data = await aload_data() or dict(DEFAULT_DATA)
         now = datetime.now(JST)
         date_str = now.strftime('%m/%d(月)')
 
@@ -256,7 +265,7 @@ https://techplay.jp/blog"""
             # 投稿の成否に関わらずデータを削除（19:00の新規作成のため）
             data['hackmd'] = None
             data['connpass'] = None
-            save_data(data)
+            await asave_data(data)
             print('18:30投稿後にデータを削除しました')
 
 async def post_writing_time():
@@ -294,7 +303,7 @@ async def post_create_hackmd():
 
         # データ保存（読み込めない場合も作成した HackMD URL は必ず保存する）
         # 読み込めない場合は判明した項目だけ書き，Sheets 上の他の項目（connpass 等）は保持する
-        data = load_data() or {}
+        data = await aload_data() or {}
         if hackmd_url:
             data['hackmd'] = hackmd_url
 
@@ -305,7 +314,7 @@ async def post_create_hackmd():
                     data['connpass'] = connpass_url
                     print(f'connpass URL を自動設定しました: {connpass_url}')
 
-            save_data(data)
+            await asave_data(data)
 
         # 投稿
         date_str = next_monday.strftime('%m/%d (月)')
@@ -356,7 +365,7 @@ def check_connpass_rss():
 
 async def check_and_post_connpass():
     """connpass URL が未設定の場合、RSS をチェックして自動投稿"""
-    data = load_data()
+    data = await aload_data()
 
     # 読み込めない場合は何もしない（既定値で保存すると hackmd が消えるため）
     # connpass URL が設定済みの場合はスキップ
@@ -370,7 +379,7 @@ async def check_and_post_connpass():
 
     # connpass URL を保存
     data['connpass'] = connpass_url
-    save_data(data)
+    await asave_data(data)
     print(f'connpass URL を自動設定しました: {connpass_url}')
 
     # /announce と同じ内容を投稿
@@ -404,7 +413,7 @@ async def ls(interaction: discord.Interaction):
     date_str = next_monday.strftime('%m/%d (月)')
 
     # 現在の設定を読み込み
-    data = load_data()
+    data = await aload_data()
     if data is None:
         await interaction.followup.send(LOAD_ERROR_MESSAGE, ephemeral=True)
         return
@@ -432,7 +441,7 @@ async def announce(interaction: discord.Interaction):
     date_str = next_monday.strftime('%m/%d(月)')
 
     # 現在の設定を読み込み
-    data = load_data()
+    data = await aload_data()
     if data is None:
         await interaction.followup.send(LOAD_ERROR_MESSAGE, ephemeral=True)
         return
@@ -477,12 +486,12 @@ async def set_connpass(interaction: discord.Interaction, url: str):
     # URLから ? 以降のパラメータを削除
     clean_url = url.split('?')[0]
 
-    data = load_data()
+    data = await aload_data()
     if data is None:
         await interaction.followup.send(LOAD_ERROR_MESSAGE, ephemeral=True)
         return
     data['connpass'] = clean_url
-    save_data(data)
+    await asave_data(data)
     await interaction.followup.send(f'✅ connpass URL を設定しました: {clean_url}', ephemeral=True, suppress_embeds=True)
 
 @bot.tree.command(name="set_hackmd", description="HackMD の URL を設定します")
@@ -496,12 +505,12 @@ async def set_hackmd(interaction: discord.Interaction, url: str):
     # データ読み書き（再試行あり）が 3 秒の応答期限を超えうるため先に defer する
     await interaction.response.defer(ephemeral=True)
 
-    data = load_data()
+    data = await aload_data()
     if data is None:
         await interaction.followup.send(LOAD_ERROR_MESSAGE, ephemeral=True)
         return
     data['hackmd'] = url
-    save_data(data)
+    await asave_data(data)
     await interaction.followup.send(f'✅ HackMD URL を設定しました: {url}', ephemeral=True, suppress_embeds=True)
 
 @bot.tree.command(name="check_time", description="現在時刻とタイムゾーンを確認します")
