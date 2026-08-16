@@ -31,6 +31,8 @@ Discord サーバー「とみおハウス」で動作する，テックブログ
 
 ### 1. 依存パッケージのインストール
 
+前提とする Python は 3.11 です．版は `.python-version` で宣言しています．
+
 ```bash
 pip install -r requirements.txt
 ```
