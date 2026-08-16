@@ -40,7 +40,10 @@ cp .env.example .env
    - 例外は 18:30 の投稿後で，読み込みの成否によらず両リンクを消す（19:00 の新規作成に備えた意図的な消去）
    - Sheets 保存が失敗したら `data.json` へ `_unsynced` を付け，次回読み込み時に再同期する
    - Sheets 書き込みは行位置固定（2 行目 hackmd，3 行目 connpass）の部分更新
-   - 非同期処理からは `aload_data` / `asave_data`（`asyncio.to_thread`）経由で呼び，再試行の待機中もイベントループを止めない
+   - 非同期処理からは `aload_data` / `asave_data`（`asyncio.to_thread`）経由で呼ぶ
+   - 再試行の待機中もイベントループは止まらない
+   - 呼び出し側は変更した項目だけを `save_data` へ渡す．辞書全体を渡すと同時実行で相手の更新を戻す
+   - `load_data` / `save_data` は `threading.RLock` で直列化する．複数スレッドから同時に呼ばれるため
 
 ### 重要な実装詳細
 

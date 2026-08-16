@@ -11,6 +11,7 @@ import json
 import re
 import time
 import asyncio
+import threading
 import requests
 import feedparser
 from dotenv import load_dotenv
@@ -119,78 +120,68 @@ def write_local(data, unsynced):
     with open(DATA_FILE, 'w', encoding='utf-8') as f:
         json.dump({**data, UNSYNCED_KEY: True} if unsynced else data, f, ensure_ascii=False, indent=2)
 
+# ストレージの読み書きを直列化する．asyncio.to_thread により複数スレッドから
+# 同時に呼ばれうるため，読み込みからキャッシュ書き込みまでの間に割り込ませない．
+# load_data が内部で save_data を呼ぶ再同期経路があるため RLock を使う
+_storage_lock = threading.RLock()
+
 def load_data():
     """データを読み込む．
     Google Sheets 設定時は Sheets を正とし，再試行しても読めなければローカルキャッシュを返す．
     キャッシュも無ければ None を返す（既定値を返すと後続の保存で hackmd が消えるため）．
     未同期の印が付いたキャッシュがあればそれを正とし，Sheets へ再同期する．
     """
-    cached, unsynced = load_local()
-    if unsynced and cached is not None:
-        print('未同期のローカルキャッシュを Google Sheets へ再同期します')
-        save_data(cached)
-        return cached
-    try:
-        data = with_retry(read_sheet, 'Google Sheets 読み込み')
-    except Exception:
-        return cached
-    if data is not None:
-        # 読み込めた最新値でキャッシュを更新する（古いキャッシュが後の再同期で正になるのを防ぐ）
+    with _storage_lock:
+        cached, unsynced = load_local()
+        if unsynced and cached is not None:
+            print('未同期のローカルキャッシュを Google Sheets へ再同期します')
+            save_data(cached)
+            return cached
         try:
-            write_local(data, unsynced=False)
-        except Exception as e:
-            print(f'ローカルファイルへのデータ保存エラー: {e}')
-        return data
-    return cached if cached is not None else dict(DEFAULT_DATA)
+            data = with_retry(read_sheet, 'Google Sheets 読み込み')
+        except Exception:
+            return cached
+        if data is not None:
+            # 読み込めた最新値でキャッシュを更新する（古いキャッシュが後の再同期で正になるのを防ぐ）
+            try:
+                write_local(data, unsynced=False)
+            except Exception as e:
+                print(f'ローカルファイルへのデータ保存エラー: {e}')
+            return data
+        return cached if cached is not None else dict(DEFAULT_DATA)
 
 def save_data(data):
     """Google Sheets とローカルキャッシュにデータを保存する．data は一部の項目だけでもよい．
     Sheets へは渡された項目だけ書き，ローカルには既存キャッシュと統合した全項目を書く．
     """
-    cached, was_unsynced = load_local()
-    merged = {**(cached or {}), **data}
-    # 未同期のキャッシュがあれば，その内容ごと Sheets へ書き戻す
-    payload = merged if was_unsynced else data
+    with _storage_lock:
+        cached, was_unsynced = load_local()
+        merged = {**(cached or {}), **data}
+        # 未同期のキャッシュがあれば，その内容ごと Sheets へ書き戻す
+        payload = merged if was_unsynced else data
 
-    synced = True
-    try:
-        if with_retry(lambda: write_sheet(payload), 'Google Sheets 保存'):
-            print(f'Google Sheetsにデータを保存しました: {payload}')
-    except Exception:
-        synced = False
-        print('Google Sheets への保存に失敗しました．ローカルキャッシュのみ更新し，次回の読み込み時に再同期します')
+        synced = True
+        try:
+            if with_retry(lambda: write_sheet(payload), 'Google Sheets 保存'):
+                print(f'Google Sheetsにデータを保存しました: {payload}')
+        except Exception:
+            synced = False
+            print('Google Sheets への保存に失敗しました．ローカルキャッシュのみ更新し，次回の読み込み時に再同期します')
 
-    # ローカルキャッシュは常に更新する（Sheets 障害時のフォールバック兼再同期の元データ）
-    try:
-        write_local(merged, unsynced=not synced)
-        print(f'ローカルファイルにデータを保存しました: {merged}')
-    except Exception as e:
-        print(f'ローカルファイルへのデータ保存エラー: {e}')
-
-# ストレージアクセスを直列化する．to_thread により読み書きが並行しうるため．
-# asyncio.Lock は生成時ではなく初回 acquire 時に実行中のイベントループへ束縛されるため，
-# モジュール読み込み時に生成すると，のちに別のイベントループ（テストの各関数等）から
-# 使われた際に RuntimeError になる．実行中ループごとに束縛し直す
-_storage_lock = None
-_storage_lock_loop = None
-
-def _get_storage_lock():
-    loop = asyncio.get_running_loop()
-    global _storage_lock, _storage_lock_loop
-    if _storage_lock is None or _storage_lock_loop is not loop:
-        _storage_lock = asyncio.Lock()
-        _storage_lock_loop = loop
-    return _storage_lock
+        # ローカルキャッシュは常に更新する（Sheets 障害時のフォールバック兼再同期の元データ）
+        try:
+            write_local(merged, unsynced=not synced)
+            print(f'ローカルファイルにデータを保存しました: {merged}')
+        except Exception as e:
+            print(f'ローカルファイルへのデータ保存エラー: {e}')
 
 async def aload_data():
     """load_data をスレッドで実行する．再試行の待機中もイベントループを止めない"""
-    async with _get_storage_lock():
-        return await asyncio.to_thread(load_data)
+    return await asyncio.to_thread(load_data)
 
 async def asave_data(data):
     """save_data をスレッドで実行する．再試行の待機中もイベントループを止めない"""
-    async with _get_storage_lock():
-        return await asyncio.to_thread(save_data, data)
+    return await asyncio.to_thread(save_data, data)
 
 def get_next_monday():
     """次の月曜日の日付を取得"""

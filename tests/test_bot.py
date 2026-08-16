@@ -130,21 +130,25 @@ async def test_aload_data_does_not_block_event_loop():
 
 @pytest.mark.asyncio
 async def test_storage_lock_serializes_access():
-    """aload_data / asave_data はモジュールレベルの lock で直列化され，同時に実行されない
-    （set_connpass と set_hackmd 等が重なっても互いのスナップショットを壊さないため）"""
+    """save_data の読み込みからキャッシュ書き込みまでは lock で直列化され，割り込まれない
+    （set_connpass と set_hackmd 等が重なっても互いの項目を消さないため）"""
     in_progress = threading.Event()
     overlap_detected = []
 
-    def fake_load_data():
+    def slow_write_local(data, unsynced):
         if in_progress.is_set():
             overlap_detected.append(True)
         in_progress.set()
         time_module.sleep(0.05)
         in_progress.clear()
-        return {'hackmd': None, 'connpass': None}
 
-    with patch('bot.load_data', side_effect=fake_load_data):
-        await asyncio.gather(bot.aload_data(), bot.aload_data())
+    with patch('bot.get_worksheet', return_value=None):
+        with patch('bot.load_local', return_value=({}, False)):
+            with patch('bot.write_local', side_effect=slow_write_local):
+                await asyncio.gather(
+                    bot.asave_data({'hackmd': 'H'}),
+                    bot.asave_data({'connpass': 'C'}),
+                )
 
     assert overlap_detected == []
 
