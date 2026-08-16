@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## ドキュメントの文体
+
+- `README.md` と `GOOGLE_SHEETS_SETUP.md` は利用者向けの手引きのため「ですます調」で書く．他はである調．
+
 ## 開発コマンド
 
 ```bash
