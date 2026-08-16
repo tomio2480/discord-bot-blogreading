@@ -70,4 +70,5 @@ Codex は指摘があれば inline コメント，無ければ一般コメント
 - Issue #28 — CI で pytest を実行する workflow を追加する
 - Issue #29 — 開発環境の前提 Python 版を明示し，依存の版ずれを検知できるようにする
 - PR #30 — 上記 2 件をまとめて解消した変更
-- `docs/notes/2026-08-17-textlint-verification-and-branch-hygiene.md` — `fail_on_error` の前例
+- `fail_on_error` の前例を記した知見メモ
+  - `docs/notes/2026-08-17-textlint-verification-and-branch-hygiene.md`
