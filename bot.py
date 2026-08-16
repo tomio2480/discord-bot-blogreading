@@ -9,6 +9,7 @@ import pytz
 import os
 import json
 import re
+import time
 import requests
 import feedparser
 from dotenv import load_dotenv
@@ -25,6 +26,13 @@ ALLOWED_USER = 'tomio2480'
 
 # データファイル
 DATA_FILE = 'data.json'
+DEFAULT_DATA = {'hackmd': None, 'connpass': None}
+# Google Sheets 上の行位置（2 行目から）をこの順で固定する
+DATA_KEYS = ['hackmd', 'connpass']
+
+# Google Sheets API の一時的な失敗に対する再試行回数と待機秒数
+SHEETS_RETRY = 3
+SHEETS_RETRY_WAIT = 2
 
 # 日本標準時
 JST = pytz.timezone('Asia/Tokyo')
@@ -37,91 +45,126 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 scheduler = AsyncIOScheduler(timezone=JST)
 
 # Google Sheets接続
-def get_sheets_client():
-    """Google Sheetsクライアントを取得"""
-    try:
-        creds_json = os.getenv('GOOGLE_SHEETS_CREDENTIALS')
-        if not creds_json:
-            return None
-        
-        creds_dict = json.loads(creds_json)
-        creds = Credentials.from_service_account_info(
-            creds_dict,
-            scopes=['https://www.googleapis.com/auth/spreadsheets']
-        )
-        return gspread.authorize(creds)
-    except Exception as e:
-        print(f'Google Sheetsクライアント取得エラー: {e}')
-        return None
-
 def get_worksheet():
-    """ワークシートを取得"""
-    try:
-        client = get_sheets_client()
-        if not client:
-            return None
-        
-        spreadsheet_id = os.getenv('GOOGLE_SHEETS_SPREADSHEET_ID')
-        if not spreadsheet_id:
-            return None
-        
-        spreadsheet = client.open_by_key(spreadsheet_id)
-        return spreadsheet.sheet1
-    except Exception as e:
-        print(f'ワークシート取得エラー: {e}')
+    """ワークシートを取得．未設定なら None を返し，設定済みで取得に失敗すれば例外を送出する"""
+    creds_json = os.getenv('GOOGLE_SHEETS_CREDENTIALS')
+    spreadsheet_id = os.getenv('GOOGLE_SHEETS_SPREADSHEET_ID')
+    if not creds_json or not spreadsheet_id:
         return None
+    creds = Credentials.from_service_account_info(
+        json.loads(creds_json),
+        scopes=['https://www.googleapis.com/auth/spreadsheets']
+    )
+    return gspread.authorize(creds).open_by_key(spreadsheet_id).sheet1
+
+def with_retry(func, label):
+    """func を最大 SHEETS_RETRY 回試行し，最後まで失敗したら例外を送出する"""
+    for attempt in range(1, SHEETS_RETRY + 1):
+        try:
+            return func()
+        except Exception as e:
+            print(f'{label}エラー ({attempt}/{SHEETS_RETRY}): {e}')
+            if attempt == SHEETS_RETRY:
+                raise
+            time.sleep(SHEETS_RETRY_WAIT)
 
 # データ管理
-def load_data():
-    """Google Sheetsまたはローカルファイルからデータを読み込み"""
+def read_sheet():
+    """Google Sheets からデータを読み込む．未設定なら None を返す"""
+    worksheet = get_worksheet()
+    if worksheet is None:
+        return None
+    data = {}
+    for record in worksheet.get_all_records():
+        key = record.get('キー') or record.get('key')
+        if key:
+            data[key] = record.get('値') or record.get('value')
+    print(f'Google Sheetsからデータを読み込みました: {data}')
+    return data or dict(DEFAULT_DATA)
+
+def write_sheet(data):
+    """Google Sheets にデータを書き込む．未設定なら False を返す．
+    渡された項目の行だけ更新し，渡されなかった項目の行は保持する（部分更新）．
+    """
+    worksheet = get_worksheet()
+    if worksheet is None:
+        return False
+    updates = [{'range': 'A1:B1', 'values': [['キー', '値']]}]
+    for key, value in data.items():
+        if key in DATA_KEYS:
+            row = DATA_KEYS.index(key) + 2
+            updates.append({'range': f'A{row}:B{row}', 'values': [[key, value or '']]})
+    worksheet.batch_update(updates)
+    return True
+
+# ローカルキャッシュが Google Sheets より新しい（未同期）ことを示す印．
+# メモリではなくファイルに残すことで，Bot の再起動をまたいでも判別できる
+UNSYNCED_KEY = '_unsynced'
+
+def load_local():
+    """ローカルキャッシュを読み込み (data, unsynced) を返す．無い・読めない場合は (None, False)"""
     try:
-        worksheet = get_worksheet()
-        if worksheet:
-            # Google Sheetsから全データを取得
-            records = worksheet.get_all_records()
-            data = {}
-            for record in records:
-                key = record.get('キー') or record.get('key')
-                value = record.get('値') or record.get('value')
-                if key:
-                    data[key] = value
-            
-            print(f'Google Sheetsからデータを読み込みました: {data}')
-            return data if data else {'hackmd': None, 'connpass': None}
+        if os.path.exists(DATA_FILE):
+            with open(DATA_FILE, 'r', encoding='utf-8') as f:
+                cached = json.load(f)
+            return cached, bool(cached.pop(UNSYNCED_KEY, False))
     except Exception as e:
-        print(f'Google Sheetsからのデータ読み込みエラー: {e}')
-    
-    # Google Sheets未設定またはエラー時はローカルファイルを使用
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    return {'hackmd': None, 'connpass': None}
+        print(f'ローカルファイルの読み込みエラー: {e}')
+    return None, False
+
+def write_local(data, unsynced):
+    """ローカルキャッシュを書き込む．unsynced なら未同期の印を付ける"""
+    os.makedirs(os.path.dirname(DATA_FILE) if os.path.dirname(DATA_FILE) else '.', exist_ok=True)
+    with open(DATA_FILE, 'w', encoding='utf-8') as f:
+        json.dump({**data, UNSYNCED_KEY: True} if unsynced else data, f, ensure_ascii=False, indent=2)
+
+def load_data():
+    """データを読み込む．
+    Google Sheets 設定時は Sheets を正とし，再試行しても読めなければローカルキャッシュを返す．
+    キャッシュも無ければ None を返す（既定値を返すと後続の保存で hackmd が消えるため）．
+    未同期の印が付いたキャッシュがあればそれを正とし，Sheets へ再同期する．
+    """
+    cached, unsynced = load_local()
+    if unsynced and cached is not None:
+        print('未同期のローカルキャッシュを Google Sheets へ再同期します')
+        save_data(cached)
+        return cached
+    try:
+        data = with_retry(read_sheet, 'Google Sheets 読み込み')
+    except Exception:
+        return cached
+    if data is not None:
+        # 読み込めた最新値でキャッシュを更新する（古いキャッシュが後の再同期で正になるのを防ぐ）
+        try:
+            write_local(data, unsynced=False)
+        except Exception as e:
+            print(f'ローカルファイルへのデータ保存エラー: {e}')
+        return data
+    return cached if cached is not None else dict(DEFAULT_DATA)
 
 def save_data(data):
-    """Google Sheetsとローカルファイルの両方にデータを保存"""
-    # ローカルファイルに常に保存（フォールバック時の整合性を保証）
-    # ローカル書き込みが失敗しても Google Sheets への保存は継続する
+    """Google Sheets とローカルキャッシュにデータを保存する．data は一部の項目だけでもよい．
+    Sheets へは渡された項目だけ書き，ローカルには既存キャッシュと統合した全項目を書く．
+    """
+    cached, was_unsynced = load_local()
+    merged = {**(cached or {}), **data}
+    # 未同期のキャッシュがあれば，その内容ごと Sheets へ書き戻す
+    payload = merged if was_unsynced else data
+
+    synced = True
     try:
-        os.makedirs(os.path.dirname(DATA_FILE) if os.path.dirname(DATA_FILE) else '.', exist_ok=True)
-        with open(DATA_FILE, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        if with_retry(lambda: write_sheet(payload), 'Google Sheets 保存'):
+            print(f'Google Sheetsにデータを保存しました: {payload}')
+    except Exception:
+        synced = False
+        print('Google Sheets への保存に失敗しました．ローカルキャッシュのみ更新し，次回の読み込み時に再同期します')
+
+    # ローカルキャッシュは常に更新する（Sheets 障害時のフォールバック兼再同期の元データ）
+    try:
+        write_local(merged, unsynced=not synced)
+        print(f'ローカルファイルにデータを保存しました: {merged}')
     except Exception as e:
         print(f'ローカルファイルへのデータ保存エラー: {e}')
-
-    try:
-        worksheet = get_worksheet()
-        if worksheet:
-            worksheet.clear()
-            worksheet.update('A1:B1', [['キー', '値']])
-            rows = [[key, value if value else ''] for key, value in data.items()]
-            if rows:
-                worksheet.update(f'A2:B{len(rows)+1}', rows)
-            print(f'Google Sheetsにデータを保存しました: {data}')
-            return
-    except Exception as e:
-        print(f'Google Sheetsへのデータ保存エラー: {e}')
-
-    print(f'ローカルファイルにデータを保存しました: {data}')
 
 def get_next_monday():
     """次の月曜日の日付を取得"""
@@ -188,7 +231,8 @@ async def post_start():
     """月曜 18:30 (JST) の投稿"""
     channel = bot.get_channel(CHANNEL_ID)
     if channel:
-        data = load_data()
+        # 読み込めない場合も投稿は行い，投稿後のクリアで状態を確定させる
+        data = load_data() or dict(DEFAULT_DATA)
         now = datetime.now(JST)
         date_str = now.strftime('%m/%d(月)')
 
@@ -248,9 +292,10 @@ async def post_create_hackmd():
 
         hackmd_url = create_hackmd_note(title, alias, content_with_title)
 
-        # データ保存
+        # データ保存（読み込めない場合も作成した HackMD URL は必ず保存する）
+        # 読み込めない場合は判明した項目だけ書き，Sheets 上の他の項目（connpass 等）は保持する
+        data = load_data() or {}
         if hackmd_url:
-            data = load_data()
             data['hackmd'] = hackmd_url
 
             # connpass URL が未設定の場合、RSS から自動取得を試みる
@@ -267,7 +312,6 @@ async def post_create_hackmd():
         hackmd_text = hackmd_url or '（HackMD作成失敗）'
 
         # connpass が設定済みの場合は connpass URL も含める
-        data = load_data()
         connpass_url = data.get('connpass')
 
         if connpass_url:
@@ -314,8 +358,9 @@ async def check_and_post_connpass():
     """connpass URL が未設定の場合、RSS をチェックして自動投稿"""
     data = load_data()
 
+    # 読み込めない場合は何もしない（既定値で保存すると hackmd が消えるため）
     # connpass URL が設定済みの場合はスキップ
-    if data.get('connpass'):
+    if data is None or data.get('connpass'):
         return
 
     # RSS から次の月曜日のイベントを探す
@@ -342,6 +387,8 @@ async def check_and_post_connpass():
             print('connpass 自動取得による投稿を行いました')
 
 # スラッシュコマンド
+LOAD_ERROR_MESSAGE = '❌ データを読み込めませんでした．時間をおいて再実行してください'
+
 @bot.tree.command(name="ls", description="次の月曜日の日付と設定されているリンクを表示します")
 async def ls(interaction: discord.Interaction):
     # tomio2480 のみ実行可能
@@ -349,12 +396,18 @@ async def ls(interaction: discord.Interaction):
         await interaction.response.send_message('❌ このコマンドを実行する権限がありません', ephemeral=True)
         return
 
+    # データ読み込み（再試行あり）が 3 秒の応答期限を超えうるため先に defer する
+    await interaction.response.defer(ephemeral=True)
+
     # 次の月曜日の日付を取得
     next_monday = get_next_monday()
     date_str = next_monday.strftime('%m/%d (月)')
 
     # 現在の設定を読み込み
     data = load_data()
+    if data is None:
+        await interaction.followup.send(LOAD_ERROR_MESSAGE, ephemeral=True)
+        return
     hackmd_text = data.get('hackmd') or '（HackMD 未設定）'
     connpass_text = data.get('connpass') or '（connpass 未設定）'
 
@@ -362,7 +415,7 @@ async def ls(interaction: discord.Interaction):
 HackMD: {hackmd_text}
 connpass: {connpass_text}"""
 
-    await interaction.response.send_message(message, ephemeral=True, suppress_embeds=True)
+    await interaction.followup.send(message, ephemeral=True, suppress_embeds=True)
 
 @bot.tree.command(name="announce", description="次回の月曜日の情報をチャンネルに投稿します")
 async def announce(interaction: discord.Interaction):
@@ -371,15 +424,21 @@ async def announce(interaction: discord.Interaction):
         await interaction.response.send_message('❌ このコマンドを実行する権限がありません', ephemeral=True)
         return
 
+    # データ読み込み（再試行あり）が 3 秒の応答期限を超えうるため先に defer する
+    await interaction.response.defer(ephemeral=True)
+
     # 次の月曜日の日付を取得
     next_monday = get_next_monday()
     date_str = next_monday.strftime('%m/%d(月)')
 
     # 現在の設定を読み込み
     data = load_data()
+    if data is None:
+        await interaction.followup.send(LOAD_ERROR_MESSAGE, ephemeral=True)
+        return
     hackmd_url = data.get('hackmd')
     connpass_url = data.get('connpass')
-    
+
     # URLが空の場合は警告を表示
     if not hackmd_url or not connpass_url:
         missing = []
@@ -387,9 +446,9 @@ async def announce(interaction: discord.Interaction):
             missing.append('HackMD')
         if not connpass_url:
             missing.append('connpass')
-        
+
         warning = f"⚠️ {' と '.join(missing)} の URL が設定されていません。\n先に `/set_hackmd` と `/set_connpass` で URL を設定してください。"
-        await interaction.response.send_message(warning, ephemeral=True)
+        await interaction.followup.send(warning, ephemeral=True)
         return
 
     message = f"""次回 {date_str} 分
@@ -400,9 +459,9 @@ async def announce(interaction: discord.Interaction):
     channel = bot.get_channel(CHANNEL_ID)
     if channel:
         await channel.send(message, suppress_embeds=True)
-        await interaction.response.send_message('✅ お知らせを投稿しました', ephemeral=True)
+        await interaction.followup.send('✅ お知らせを投稿しました', ephemeral=True)
     else:
-        await interaction.response.send_message('❌ チャンネルが見つかりません', ephemeral=True)
+        await interaction.followup.send('❌ チャンネルが見つかりません', ephemeral=True)
 
 @bot.tree.command(name="set_connpass", description="connpass の URL を設定します")
 @app_commands.describe(url="connpass イベントの URL")
@@ -412,13 +471,19 @@ async def set_connpass(interaction: discord.Interaction, url: str):
         await interaction.response.send_message('❌ このコマンドを実行する権限がありません', ephemeral=True)
         return
 
+    # データ読み書き（再試行あり）が 3 秒の応答期限を超えうるため先に defer する
+    await interaction.response.defer(ephemeral=True)
+
     # URLから ? 以降のパラメータを削除
     clean_url = url.split('?')[0]
 
     data = load_data()
+    if data is None:
+        await interaction.followup.send(LOAD_ERROR_MESSAGE, ephemeral=True)
+        return
     data['connpass'] = clean_url
     save_data(data)
-    await interaction.response.send_message(f'✅ connpass URL を設定しました: {clean_url}', ephemeral=True, suppress_embeds=True)
+    await interaction.followup.send(f'✅ connpass URL を設定しました: {clean_url}', ephemeral=True, suppress_embeds=True)
 
 @bot.tree.command(name="set_hackmd", description="HackMD の URL を設定します")
 @app_commands.describe(url="HackMD メモの URL")
@@ -428,10 +493,16 @@ async def set_hackmd(interaction: discord.Interaction, url: str):
         await interaction.response.send_message('❌ このコマンドを実行する権限がありません', ephemeral=True)
         return
 
+    # データ読み書き（再試行あり）が 3 秒の応答期限を超えうるため先に defer する
+    await interaction.response.defer(ephemeral=True)
+
     data = load_data()
+    if data is None:
+        await interaction.followup.send(LOAD_ERROR_MESSAGE, ephemeral=True)
+        return
     data['hackmd'] = url
     save_data(data)
-    await interaction.response.send_message(f'✅ HackMD URL を設定しました: {url}', ephemeral=True, suppress_embeds=True)
+    await interaction.followup.send(f'✅ HackMD URL を設定しました: {url}', ephemeral=True, suppress_embeds=True)
 
 @bot.tree.command(name="check_time", description="現在時刻とタイムゾーンを確認します")
 async def check_time(interaction: discord.Interaction):
@@ -440,8 +511,6 @@ async def check_time(interaction: discord.Interaction):
         await interaction.response.send_message('❌ このコマンドを実行する権限がありません', ephemeral=True)
         return
 
-    import time
-    
     # 現在時刻（JST）
     now_jst = datetime.now(JST)
     

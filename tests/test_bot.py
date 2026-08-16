@@ -59,8 +59,8 @@ def test_save_data():
     m = mock_open()
     with patch('builtins.open', m):
         bot.save_data(test_data)
-        
-    m.assert_called_once_with('data.json', 'w', encoding='utf-8')
+
+    m.assert_any_call('data.json', 'w', encoding='utf-8')
     handle = m()
     written_data = ''.join(call.args[0] for call in handle.write.call_args_list)
     assert json.loads(written_data) == test_data
@@ -549,9 +549,9 @@ def test_save_data_always_writes_local_file():
             bot.save_data(test_data)
 
     # Google Sheets にも保存される
-    mock_worksheet.clear.assert_called_once()
+    mock_worksheet.batch_update.assert_called_once()
     # ローカルファイルにも書き込まれる
-    m.assert_called_once_with('data.json', 'w', encoding='utf-8')
+    m.assert_any_call('data.json', 'w', encoding='utf-8')
 
 
 def test_save_data_local_file_has_cleared_data_after_google_sheets_save():
@@ -583,9 +583,249 @@ def test_save_data_local_write_failure_does_not_skip_google_sheets():
         with patch('builtins.open', side_effect=OSError('read-only file system')):
             bot.save_data(test_data)
 
-    # ローカル失敗に関わらず Google Sheets へ保存される
-    mock_worksheet.clear.assert_called_once()
-    assert mock_worksheet.update.call_count == 2
+    # ローカル失敗に関わらず Google Sheets へ保存される（ヘッダー + 2 項目）
+    mock_worksheet.batch_update.assert_called_once()
+    assert len(mock_worksheet.batch_update.call_args[0][0]) == 3
+
+
+def test_write_sheet_partial_update_preserves_other_rows():
+    """一部の項目だけ渡した場合，その行だけ更新し他の項目の行には触れない"""
+    mock_worksheet = MagicMock()
+
+    with patch('bot.get_worksheet', return_value=mock_worksheet):
+        with patch('builtins.open', mock_open()):
+            bot.save_data({'hackmd': 'https://hackmd.io/only'})
+
+    mock_worksheet.clear.assert_not_called()
+    ranges = [u['range'] for u in mock_worksheet.batch_update.call_args[0][0]]
+    assert ranges == ['A1:B1', 'A2:B2']  # ヘッダーと hackmd 行のみ．connpass 行（A3:B3）は保持
+    values = [u['values'] for u in mock_worksheet.batch_update.call_args[0][0]]
+    assert values[1] == [['hackmd', 'https://hackmd.io/only']]
+
+
+# ========================================
+# Google Sheets 障害時のデータ消失防止テスト
+# ========================================
+
+def test_load_data_returns_none_when_sheets_fails_and_no_cache():
+    """Sheets 設定済みで読み込みに失敗し，ローカルキャッシュも無ければ None を返す"""
+    with patch('bot.get_worksheet', side_effect=Exception('API error')):
+        with patch('os.path.exists', return_value=False):
+            with patch('bot.time.sleep'):
+                result = bot.load_data()
+
+    # 既定値ではなく None を返し，呼び出し側が上書き保存しないようにする
+    assert result is None
+
+
+def test_load_data_returns_local_cache_when_sheets_fails():
+    """Sheets 読み込みに失敗した場合はローカルキャッシュを返す"""
+    cached = {'hackmd': 'https://hackmd.io/cached', 'connpass': None}
+
+    with patch('bot.get_worksheet', side_effect=Exception('API error')):
+        with patch('os.path.exists', return_value=True):
+            with patch('builtins.open', mock_open(read_data=json.dumps(cached))):
+                with patch('bot.time.sleep'):
+                    result = bot.load_data()
+
+    assert result == cached
+
+
+def test_load_data_retries_sheets_read():
+    """Sheets 読み込みが一時的に失敗しても再試行して読み込む"""
+    mock_worksheet = MagicMock()
+    mock_worksheet.get_all_records.return_value = [
+        {'キー': 'hackmd', '値': 'https://hackmd.io/test'},
+        {'キー': 'connpass', '値': ''},
+    ]
+
+    with patch('bot.get_worksheet', side_effect=[Exception('transient'), mock_worksheet]) as mock_get:
+        with patch('bot.time.sleep') as mock_sleep:
+            with patch('builtins.open', mock_open()):
+                result = bot.load_data()
+
+    assert result == {'hackmd': 'https://hackmd.io/test', 'connpass': None}
+    assert mock_get.call_count == 2
+    mock_sleep.assert_called_once()
+
+
+def test_load_data_refreshes_local_cache_after_sheets_read():
+    """Sheets を読み込めたら，その内容でローカルキャッシュを更新する（古いキャッシュが再同期で昇格しないように）"""
+    mock_worksheet = MagicMock()
+    mock_worksheet.get_all_records.return_value = [
+        {'キー': 'hackmd', '値': 'https://hackmd.io/remote'},
+        {'キー': 'connpass', '値': 'https://connpass.com/remote'},
+    ]
+    stale = json.dumps({'hackmd': 'https://hackmd.io/stale', 'connpass': None})
+    m = mock_open(read_data=stale)
+
+    with patch('bot.get_worksheet', return_value=mock_worksheet):
+        with patch('builtins.open', m):
+            with patch('os.path.exists', return_value=True):
+                result = bot.load_data()
+
+    assert result == {'hackmd': 'https://hackmd.io/remote', 'connpass': 'https://connpass.com/remote'}
+    m.assert_any_call('data.json', 'w', encoding='utf-8')
+    assert _written_json(m) == result
+
+
+def test_save_data_retries_sheets_write():
+    """Sheets 書き込みが一時的に失敗しても再試行して保存する"""
+    test_data = {'hackmd': 'https://hackmd.io/test', 'connpass': None}
+    mock_worksheet = MagicMock()
+    mock_worksheet.batch_update.side_effect = [Exception('transient'), None]
+
+    with patch('bot.get_worksheet', return_value=mock_worksheet):
+        with patch('builtins.open', mock_open()):
+            with patch('bot.time.sleep'):
+                bot.save_data(test_data)
+
+    assert mock_worksheet.batch_update.call_count == 2
+
+
+def _written_json(m):
+    """mock_open へ書き込まれた内容を JSON として返す"""
+    handle = m()
+    return json.loads(''.join(call.args[0] for call in handle.write.call_args_list))
+
+
+def test_save_data_marks_cache_unsynced_when_sheets_fails():
+    """Sheets 保存に失敗した場合，ローカルキャッシュに未同期の印を付けて書く（再起動後も判別できるように）"""
+    newer = {'hackmd': 'https://hackmd.io/new', 'connpass': None}
+    m = mock_open(read_data='')
+
+    with patch('bot.get_worksheet', side_effect=Exception('down')):
+        with patch('bot.time.sleep'):
+            with patch('builtins.open', m):
+                with patch('os.path.exists', return_value=False):
+                    bot.save_data(newer)
+
+    written = _written_json(m)
+    assert written[bot.UNSYNCED_KEY] is True
+    assert written['hackmd'] == newer['hackmd']
+
+
+def test_load_data_resyncs_unsynced_cache_when_sheets_recovers():
+    """未同期の印が付いたキャッシュがあれば，復旧した Sheets の古い値ではなくキャッシュを正として書き戻す"""
+    newer = {'hackmd': 'https://hackmd.io/new', 'connpass': None}
+    cached_file = json.dumps({**newer, bot.UNSYNCED_KEY: True})
+    mock_worksheet = MagicMock()
+    mock_worksheet.get_all_records.return_value = [{'キー': 'hackmd', '値': ''}]  # 古いリモート
+    m = mock_open(read_data=cached_file)
+
+    with patch('bot.get_worksheet', return_value=mock_worksheet):
+        with patch('bot.time.sleep'):
+            with patch('builtins.open', m):
+                with patch('os.path.exists', return_value=True):
+                    result = bot.load_data()
+
+    # キャッシュが返り，Sheets へ書き戻され，キャッシュの未同期の印が消える
+    assert result == newer
+    mock_worksheet.batch_update.assert_called_once()
+    mock_worksheet.get_all_records.assert_not_called()
+    assert bot.UNSYNCED_KEY not in _written_json(m)
+
+
+def test_load_data_keeps_unsynced_when_resync_fails():
+    """再同期にも失敗した場合はキャッシュを返し，未同期の印を残す"""
+    newer = {'hackmd': 'https://hackmd.io/new', 'connpass': None}
+    m = mock_open(read_data=json.dumps({**newer, bot.UNSYNCED_KEY: True}))
+
+    with patch('bot.get_worksheet', side_effect=Exception('still down')):
+        with patch('bot.time.sleep'):
+            with patch('builtins.open', m):
+                with patch('os.path.exists', return_value=True):
+                    result = bot.load_data()
+
+    assert result == newer
+    assert _written_json(m)[bot.UNSYNCED_KEY] is True
+
+
+def test_save_data_merges_partial_update_into_local_cache():
+    """部分更新でも，ローカルキャッシュには既存内容と統合した全項目を書く"""
+    cached_file = json.dumps({'hackmd': 'https://hackmd.io/old', 'connpass': 'https://connpass.com/keep'})
+    mock_worksheet = MagicMock()
+    m = mock_open(read_data=cached_file)
+
+    with patch('bot.get_worksheet', return_value=mock_worksheet):
+        with patch('builtins.open', m):
+            with patch('os.path.exists', return_value=True):
+                bot.save_data({'hackmd': 'https://hackmd.io/new'})
+
+    # Sheets へは hackmd 行だけ，ローカルには統合済みスナップショット
+    ranges = [u['range'] for u in mock_worksheet.batch_update.call_args[0][0]]
+    assert ranges == ['A1:B1', 'A2:B2']
+    assert _written_json(m) == {'hackmd': 'https://hackmd.io/new', 'connpass': 'https://connpass.com/keep'}
+
+
+def test_save_data_pushes_full_cache_when_it_was_unsynced():
+    """未同期のキャッシュがある状態で部分更新すると，キャッシュの内容ごと Sheets へ書き戻す"""
+    cached_file = json.dumps({'hackmd': None, 'connpass': 'https://connpass.com/unsynced', bot.UNSYNCED_KEY: True})
+    mock_worksheet = MagicMock()
+    m = mock_open(read_data=cached_file)
+
+    with patch('bot.get_worksheet', return_value=mock_worksheet):
+        with patch('builtins.open', m):
+            with patch('os.path.exists', return_value=True):
+                bot.save_data({'hackmd': 'https://hackmd.io/new'})
+
+    ranges = [u['range'] for u in mock_worksheet.batch_update.call_args[0][0]]
+    assert ranges == ['A1:B1', 'A2:B2', 'A3:B3']
+    assert bot.UNSYNCED_KEY not in _written_json(m)
+
+
+@pytest.mark.asyncio
+async def test_check_and_post_connpass_skips_when_load_fails():
+    """データを読み込めない場合は RSS 確認も保存も行わない（hackmd の上書き消失を防ぐ）"""
+    with patch('bot.load_data', return_value=None):
+        with patch('bot.check_connpass_rss') as mock_check:
+            with patch('bot.save_data') as mock_save:
+                await bot.check_and_post_connpass()
+
+    mock_check.assert_not_called()
+    mock_save.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_post_create_hackmd_saves_url_even_if_load_fails():
+    """19:00 にデータを読み込めなくても作成した HackMD URL は保存し投稿する"""
+    mock_channel = AsyncMock()
+    JST = pytz.timezone('Asia/Tokyo')
+    test_date = datetime(2024, 1, 8, 12, 0, 0, tzinfo=JST)
+    hackmd_url = 'https://hackmd.io/@tomio2480/blogread_20240108'
+
+    with patch.object(bot.bot, 'get_channel', return_value=mock_channel):
+        with patch('bot.get_next_monday', return_value=test_date):
+            with patch('bot.get_hackmd_template', return_value=''):
+                with patch('bot.create_hackmd_note', return_value=hackmd_url):
+                    with patch('bot.load_data', return_value=None):
+                        with patch('bot.check_connpass_rss', return_value=None):
+                            with patch('bot.save_data') as mock_save:
+                                await bot.post_create_hackmd()
+
+    mock_save.assert_called_once()
+    saved = mock_save.call_args[0][0]
+    assert saved['hackmd'] == hackmd_url
+    # 読み込めなかった項目（connpass）は書かず，Sheets 上の既存値を保持する
+    assert 'connpass' not in saved
+    mock_channel.send.assert_called_once()
+    assert hackmd_url in mock_channel.send.call_args[0][0]
+
+
+@pytest.mark.asyncio
+async def test_post_start_posts_and_clears_even_if_load_fails():
+    """18:30 にデータを読み込めなくても投稿し，データをクリアする"""
+    mock_channel = AsyncMock()
+
+    with patch.object(bot.bot, 'get_channel', return_value=mock_channel):
+        with patch('bot.load_data', return_value=None):
+            with patch('bot.save_data') as mock_save:
+                await bot.post_start()
+
+    mock_channel.send.assert_called_once()
+    assert '（HackMD 未設定）' in mock_channel.send.call_args[0][0]
+    saved = mock_save.call_args[0][0]
+    assert saved['hackmd'] is None and saved['connpass'] is None
 
 
 # ========================================
