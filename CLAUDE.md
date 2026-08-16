@@ -27,7 +27,7 @@ cp .env.example .env
 - **Google Sheets**: HackMD と connpass の URL の正本（環境変数 `GOOGLE_SHEETS_*` 設定時）
 - **data.json**: ローカルキャッシュ（Git 管理外）．Sheets 未設定時は唯一の保存先
 - **APScheduler**: JST タイムゾーンで月曜日のスケジュールを管理
-- **tests/test_bot.py**: pytest．`discord` と `feedparser` はモック化して関数単体を検証
+- **tests/test_bot.py**: pytest．`feedparser` はモック化して関数単体を検証
 
 ### 主要コンポーネント
 
