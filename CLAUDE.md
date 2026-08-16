@@ -11,6 +11,9 @@ pip install -r requirements.txt
 # Bot の起動
 python bot.py
 
+# テスト（TDD: 実装前にテストを書く）
+python -m pytest -q
+
 # 環境変数の設定（初回のみ）
 cp .env.example .env
 # .env を編集して DISCORD_TOKEN, DISCORD_CHANNEL_ID, HACKMD_API_TOKEN を設定
@@ -20,16 +23,21 @@ cp .env.example .env
 
 ### 全体構成
 
-- **bot.py**: メインファイル。Discord Bot, スケジューラ, HackMD API を統合
-- **data.json**: HackMD と connpass の URL を永続化（Git 管理外）
+- **bot.py**: メインファイル。Discord Bot, スケジューラ, HackMD API, Google Sheets, connpass RSS を統合
+- **Google Sheets**: HackMD と connpass の URL の正本（環境変数 `GOOGLE_SHEETS_*` 設定時）
+- **data.json**: ローカルキャッシュ（Git 管理外）．Sheets 未設定時は唯一の保存先
 - **APScheduler**: JST タイムゾーンで月曜日のスケジュールを管理
+- **tests/test_bot.py**: pytest．`discord` と `feedparser` はモック化して関数単体を検証
 
 ### 主要コンポーネント
 
-1. **スケジューラ**: APScheduler で JST 月曜日の 4 つの時刻に自動投稿
-2. **スラッシュコマンド**: `/set_connpass`, `/set_hackmd` を処理（tomio2480 のみ許可，ephemeral で他人に非表示）
+1. **スケジューラ**: APScheduler で JST 月曜日の 6 つの時刻に自動投稿．connpass RSS を 10 分間隔で確認
+2. **スラッシュコマンド**: `/ls`, `/announce`, `/set_connpass`, `/set_hackmd`, `/check_time`（tomio2480 のみ許可，ephemeral で他人に非表示）
 3. **HackMD 連携**: `create_hackmd_note()` で次週用メモを自動作成
-4. **データ永続化**: JSON ファイルで URL を保存
+4. **データ永続化**: `load_data()` / `save_data()`．Sheets の読み書きは 3 回再試行し，失敗時はキャッシュへ倒す
+   - 読み込みに失敗しキャッシュも無ければ `None` を返す．呼び出し側は既定値で上書き保存しない
+   - Sheets 保存に失敗したら `data.json` に `_unsynced` を付け，次回読み込み時に再同期する
+   - Sheets 書き込みは行位置固定（2 行目 hackmd，3 行目 connpass）の部分更新
 
 ### 重要な実装詳細
 
@@ -37,6 +45,8 @@ cp .env.example .env
 - 日付フォーマット: `%Y`=4桁年, `%m`=2桁月, `%d`=2桁日
 - HackMD 権限: `readPermission` と `writePermission` を `signed_in` に設定
 - スケジュール時刻のズレは ±1 分程度を許容
+- リンクを含む投稿・応答は `suppress_embeds=True` で埋め込みを抑止
+- ストレージへアクセスするスラッシュコマンドは先に `defer` し，`followup` で応答（3 秒制限対策）
 
 ### ホスティング
 
@@ -46,7 +56,7 @@ Docker でデプロイ．Vercel 等の Serverless 環境は不可（常時接続
 ### Docker 構成
 
 - **Dockerfile**: Python 3.11 slim ベース
-- **データ永続化の注意**: `data.json` は再起動で消えるため，長期的には外部 DB を推奨
+- **データ永続化の注意**: `data.json` は再起動で消えるため，Google Sheets の設定を前提とする（`GOOGLE_SHEETS_SETUP.md`）
 
 ---
 
