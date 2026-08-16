@@ -18,11 +18,7 @@ os.environ.setdefault('DISCORD_TOKEN', 'test_token')
 os.environ.setdefault('DISCORD_CHANNEL_ID', '123456789')
 os.environ.setdefault('HACKMD_API_TOKEN', 'test_hackmd_token')
 
-# discord.pyのインポートをモック化（Discord への接続を伴わずに関数単体を検証するため）
-sys.modules['discord'] = MagicMock()
-sys.modules['discord.ext'] = MagicMock()
-sys.modules['discord.ext.commands'] = MagicMock()
-sys.modules['discord.app_commands'] = MagicMock()
+# feedparser のみモック化（RSS への実接続を伴わずに関数単体を検証するため）
 sys.modules['feedparser'] = MagicMock()
 
 # bot.pyをインポート
@@ -191,93 +187,116 @@ def test_create_hackmd_note_failure():
 # スラッシュコマンドのテスト
 # ========================================
 
-@pytest.mark.skip(reason="デコレーター関数のため、統合テストで確認")
+def make_interaction(user_name):
+    """スラッシュコマンドテスト用の interaction モックを作る"""
+    mock_interaction = AsyncMock()
+    mock_interaction.user.name = user_name
+    return mock_interaction
+
+
 @pytest.mark.asyncio
 async def test_ls_command_authorized():
     """権限ありユーザーの/lsコマンド"""
-    # モックの設定
-    mock_interaction = AsyncMock()
-    mock_interaction.user.name = 'tomio2480'
-    
+    mock_interaction = make_interaction('tomio2480')
+
     test_data = {
         'hackmd': 'https://hackmd.io/test',
         'connpass': 'https://connpass.com/test'
     }
-    
+
     JST = pytz.timezone('Asia/Tokyo')
     test_date = datetime(2024, 1, 1, 12, 0, 0, tzinfo=JST)
-    
+
     with patch('bot.load_data', return_value=test_data):
         with patch('bot.get_next_monday', return_value=test_date):
-            await bot.ls(mock_interaction)
-    
-    # ephemeralで応答が送信されたことを確認
-    mock_interaction.response.send_message.assert_called_once()
-    call_args = mock_interaction.response.send_message.call_args
-    assert call_args[1]['ephemeral'] is True
+            await bot.ls.callback(mock_interaction)
+
+    # 3秒制限対策で defer してから followup で応答する
+    mock_interaction.response.defer.assert_called_once_with(ephemeral=True)
+    mock_interaction.followup.send.assert_called_once()
+    call_args = mock_interaction.followup.send.call_args
     assert '01/01 (月)' in call_args[0][0]
     assert 'https://hackmd.io/test' in call_args[0][0]
     assert 'https://connpass.com/test' in call_args[0][0]
+    assert call_args[1]['ephemeral'] is True
+    assert call_args[1]['suppress_embeds'] is True
 
 
-@pytest.mark.skip(reason="デコレーター関数のため、統合テストで確認")
 @pytest.mark.asyncio
 async def test_ls_command_unauthorized():
     """権限なしユーザーの/lsコマンド"""
-    mock_interaction = AsyncMock()
-    mock_interaction.user.name = 'other_user'
-    
-    await bot.ls(mock_interaction)
-    
-    # エラーメッセージが送信されたことを確認
+    mock_interaction = make_interaction('other_user')
+
+    await bot.ls.callback(mock_interaction)
+
+    # エラーメッセージが送信されたことを確認し，defer/followup は使われないことを確認
     mock_interaction.response.send_message.assert_called_once()
     call_args = mock_interaction.response.send_message.call_args
     assert call_args[1]['ephemeral'] is True
     assert '権限がありません' in call_args[0][0]
+    mock_interaction.response.defer.assert_not_called()
+    mock_interaction.followup.send.assert_not_called()
 
 
-@pytest.mark.skip(reason="デコレーター関数のため、統合テストで確認")
+@pytest.mark.asyncio
+async def test_ls_command_load_error():
+    """データ読み込みに失敗した場合はエラーメッセージを送信する"""
+    mock_interaction = make_interaction('tomio2480')
+
+    with patch('bot.load_data', return_value=None):
+        await bot.ls.callback(mock_interaction)
+
+    mock_interaction.response.defer.assert_called_once_with(ephemeral=True)
+    mock_interaction.followup.send.assert_called_once_with(bot.LOAD_ERROR_MESSAGE, ephemeral=True)
+
+
 @pytest.mark.asyncio
 async def test_set_connpass_authorized():
-    """connpass設定コマンド"""
-    mock_interaction = AsyncMock()
-    mock_interaction.user.name = 'tomio2480'
-    
-    test_url = 'https://connpass.com/event/12345/'
-    
+    """connpass設定コマンド（クエリパラメータは取り除いて保存する）"""
+    mock_interaction = make_interaction('tomio2480')
+
+    test_url = 'https://connpass.com/event/12345/?utm_source=x'
+    expected_url = 'https://connpass.com/event/12345/'
+
     with patch('bot.load_data', return_value={'hackmd': None, 'connpass': None}):
         with patch('bot.save_data') as mock_save:
-            await bot.set_connpass(mock_interaction, test_url)
-    
+            await bot.set_connpass.callback(mock_interaction, test_url)
+
     # データが保存されたことを確認
     mock_save.assert_called_once()
     saved_data = mock_save.call_args[0][0]
-    assert saved_data['connpass'] == test_url
-    
-    # 成功メッセージが送信されたことを確認
-    mock_interaction.response.send_message.assert_called_once()
+    assert saved_data['connpass'] == expected_url
+
+    # 成功メッセージが defer/followup で送信されたことを確認
+    mock_interaction.response.defer.assert_called_once_with(ephemeral=True)
+    mock_interaction.followup.send.assert_called_once()
+    call_args = mock_interaction.followup.send.call_args
+    assert call_args[1]['ephemeral'] is True
+    assert call_args[1]['suppress_embeds'] is True
 
 
-@pytest.mark.skip(reason="デコレーター関数のため、統合テストで確認")
 @pytest.mark.asyncio
 async def test_set_hackmd_authorized():
     """HackMD設定コマンド"""
-    mock_interaction = AsyncMock()
-    mock_interaction.user.name = 'tomio2480'
-    
+    mock_interaction = make_interaction('tomio2480')
+
     test_url = 'https://hackmd.io/test123'
-    
+
     with patch('bot.load_data', return_value={'hackmd': None, 'connpass': None}):
         with patch('bot.save_data') as mock_save:
-            await bot.set_hackmd(mock_interaction, test_url)
-    
+            await bot.set_hackmd.callback(mock_interaction, test_url)
+
     # データが保存されたことを確認
     mock_save.assert_called_once()
     saved_data = mock_save.call_args[0][0]
     assert saved_data['hackmd'] == test_url
-    
-    # 成功メッセージが送信されたことを確認
-    mock_interaction.response.send_message.assert_called_once()
+
+    # 成功メッセージが defer/followup で送信されたことを確認
+    mock_interaction.response.defer.assert_called_once_with(ephemeral=True)
+    mock_interaction.followup.send.assert_called_once()
+    call_args = mock_interaction.followup.send.call_args
+    assert call_args[1]['ephemeral'] is True
+    assert call_args[1]['suppress_embeds'] is True
 
 
 # ========================================
