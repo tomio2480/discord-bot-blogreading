@@ -147,7 +147,7 @@ Northflank では再起動時にファイルが消えます．`data.json` は揮
 
 ## 技術スタック
 
-- Python 3.11（Dockerfile の基底イメージ）
+- Python 3.11（版の正本は `.python-version`．`Dockerfile` の基底イメージも同じ）
 - discord.py
 - APScheduler（JST スケジューリング）
 - HackMD API

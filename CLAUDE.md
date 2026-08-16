@@ -11,6 +11,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 開発コマンド
 
+開発と CI の前提は Python 3.11 とする．
+版の宣言は `.python-version` を正本とし，`Dockerfile`（`python:3.11-slim`）と CI も同じ版へ揃える．
+別の版で動かすと，`discord.py` が依存する標準ライブラリの有無が変わり，`import` の時点で落ちる場合がある．
+
 ```bash
 # 依存パッケージのインストール
 pip install -r requirements.txt
