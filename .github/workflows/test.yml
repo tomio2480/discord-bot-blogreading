@@ -1,0 +1,38 @@
+name: Test
+
+# pull_request で pytest を実行する workflow．
+# Python の版は .python-version を正本とし，Dockerfile の python:3.11-slim と揃える．
+# action の参照は @<SHA> # <version> 形式の SHA pin で，Dependabot が更新 PR を起票する．
+# テストは tests/test_bot.py 側で環境変数を設定するため，Secrets は不要である．
+
+on:
+  pull_request:
+    paths:
+      - "**/*.py"
+      - "requirements.txt"
+      - "pytest.ini"
+      - ".python-version"
+      - ".github/workflows/test.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: pytest
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version-file: .python-version
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run pytest
+        run: python -m pytest -q
