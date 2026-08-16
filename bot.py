@@ -9,6 +9,7 @@ import pytz
 import os
 import json
 import re
+import time
 import requests
 import feedparser
 from dotenv import load_dotenv
@@ -25,6 +26,11 @@ ALLOWED_USER = 'tomio2480'
 
 # データファイル
 DATA_FILE = 'data.json'
+DEFAULT_DATA = {'hackmd': None, 'connpass': None}
+
+# Google Sheets API の一時的な失敗に対する再試行回数と待機秒数
+SHEETS_RETRY = 3
+SHEETS_RETRY_WAIT = 2
 
 # 日本標準時
 JST = pytz.timezone('Asia/Tokyo')
@@ -37,69 +43,79 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 scheduler = AsyncIOScheduler(timezone=JST)
 
 # Google Sheets接続
-def get_sheets_client():
-    """Google Sheetsクライアントを取得"""
-    try:
-        creds_json = os.getenv('GOOGLE_SHEETS_CREDENTIALS')
-        if not creds_json:
-            return None
-        
-        creds_dict = json.loads(creds_json)
-        creds = Credentials.from_service_account_info(
-            creds_dict,
-            scopes=['https://www.googleapis.com/auth/spreadsheets']
-        )
-        return gspread.authorize(creds)
-    except Exception as e:
-        print(f'Google Sheetsクライアント取得エラー: {e}')
-        return None
-
 def get_worksheet():
-    """ワークシートを取得"""
-    try:
-        client = get_sheets_client()
-        if not client:
-            return None
-        
-        spreadsheet_id = os.getenv('GOOGLE_SHEETS_SPREADSHEET_ID')
-        if not spreadsheet_id:
-            return None
-        
-        spreadsheet = client.open_by_key(spreadsheet_id)
-        return spreadsheet.sheet1
-    except Exception as e:
-        print(f'ワークシート取得エラー: {e}')
+    """ワークシートを取得．未設定なら None を返し，設定済みで取得に失敗すれば例外を送出する"""
+    creds_json = os.getenv('GOOGLE_SHEETS_CREDENTIALS')
+    spreadsheet_id = os.getenv('GOOGLE_SHEETS_SPREADSHEET_ID')
+    if not creds_json or not spreadsheet_id:
         return None
+    creds = Credentials.from_service_account_info(
+        json.loads(creds_json),
+        scopes=['https://www.googleapis.com/auth/spreadsheets']
+    )
+    return gspread.authorize(creds).open_by_key(spreadsheet_id).sheet1
+
+def with_retry(func, label):
+    """func を最大 SHEETS_RETRY 回試行し，最後まで失敗したら例外を送出する"""
+    for attempt in range(1, SHEETS_RETRY + 1):
+        try:
+            return func()
+        except Exception as e:
+            print(f'{label}エラー ({attempt}/{SHEETS_RETRY}): {e}')
+            if attempt == SHEETS_RETRY:
+                raise
+            time.sleep(SHEETS_RETRY_WAIT)
 
 # データ管理
-def load_data():
-    """Google Sheetsまたはローカルファイルからデータを読み込み"""
+def read_sheet():
+    """Google Sheets からデータを読み込む．未設定なら None を返す"""
+    worksheet = get_worksheet()
+    if worksheet is None:
+        return None
+    data = {}
+    for record in worksheet.get_all_records():
+        key = record.get('キー') or record.get('key')
+        if key:
+            data[key] = record.get('値') or record.get('value')
+    print(f'Google Sheetsからデータを読み込みました: {data}')
+    return data or dict(DEFAULT_DATA)
+
+def write_sheet(data):
+    """Google Sheets にデータを書き込む．未設定なら False を返す"""
+    worksheet = get_worksheet()
+    if worksheet is None:
+        return False
+    worksheet.clear()
+    worksheet.update('A1:B1', [['キー', '値']])
+    rows = [[key, value if value else ''] for key, value in data.items()]
+    if rows:
+        worksheet.update(f'A2:B{len(rows)+1}', rows)
+    return True
+
+def load_local(default):
+    """ローカルファイルからデータを読み込む．無い・読めない場合は default を返す"""
     try:
-        worksheet = get_worksheet()
-        if worksheet:
-            # Google Sheetsから全データを取得
-            records = worksheet.get_all_records()
-            data = {}
-            for record in records:
-                key = record.get('キー') or record.get('key')
-                value = record.get('値') or record.get('value')
-                if key:
-                    data[key] = value
-            
-            print(f'Google Sheetsからデータを読み込みました: {data}')
-            return data if data else {'hackmd': None, 'connpass': None}
+        if os.path.exists(DATA_FILE):
+            with open(DATA_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
     except Exception as e:
-        print(f'Google Sheetsからのデータ読み込みエラー: {e}')
-    
-    # Google Sheets未設定またはエラー時はローカルファイルを使用
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    return {'hackmd': None, 'connpass': None}
+        print(f'ローカルファイルの読み込みエラー: {e}')
+    return default
+
+def load_data():
+    """データを読み込む．
+    Google Sheets 設定時は Sheets を正とし，再試行しても読めなければローカルキャッシュを返す．
+    キャッシュも無ければ None を返す（既定値を返すと後続の保存で hackmd が消えるため）．
+    """
+    try:
+        data = with_retry(read_sheet, 'Google Sheets 読み込み')
+    except Exception:
+        return load_local(None)
+    return data if data is not None else load_local(dict(DEFAULT_DATA))
 
 def save_data(data):
     """Google Sheetsとローカルファイルの両方にデータを保存"""
-    # ローカルファイルに常に保存（フォールバック時の整合性を保証）
+    # ローカルファイルに常に保存（Sheets 障害時のキャッシュとして使う）
     # ローカル書き込みが失敗しても Google Sheets への保存は継続する
     try:
         os.makedirs(os.path.dirname(DATA_FILE) if os.path.dirname(DATA_FILE) else '.', exist_ok=True)
@@ -109,17 +125,12 @@ def save_data(data):
         print(f'ローカルファイルへのデータ保存エラー: {e}')
 
     try:
-        worksheet = get_worksheet()
-        if worksheet:
-            worksheet.clear()
-            worksheet.update('A1:B1', [['キー', '値']])
-            rows = [[key, value if value else ''] for key, value in data.items()]
-            if rows:
-                worksheet.update(f'A2:B{len(rows)+1}', rows)
+        if with_retry(lambda: write_sheet(data), 'Google Sheets 保存'):
             print(f'Google Sheetsにデータを保存しました: {data}')
             return
-    except Exception as e:
-        print(f'Google Sheetsへのデータ保存エラー: {e}')
+    except Exception:
+        print('Google Sheets への保存に失敗しました．ローカルファイルのみ更新しています')
+        return
 
     print(f'ローカルファイルにデータを保存しました: {data}')
 
@@ -188,7 +199,8 @@ async def post_start():
     """月曜 18:30 (JST) の投稿"""
     channel = bot.get_channel(CHANNEL_ID)
     if channel:
-        data = load_data()
+        # 読み込めない場合も投稿は行い，投稿後のクリアで状態を確定させる
+        data = load_data() or dict(DEFAULT_DATA)
         now = datetime.now(JST)
         date_str = now.strftime('%m/%d(月)')
 
@@ -248,9 +260,9 @@ async def post_create_hackmd():
 
         hackmd_url = create_hackmd_note(title, alias, content_with_title)
 
-        # データ保存
+        # データ保存（読み込めない場合も作成した HackMD URL は必ず保存する）
+        data = load_data() or dict(DEFAULT_DATA)
         if hackmd_url:
-            data = load_data()
             data['hackmd'] = hackmd_url
 
             # connpass URL が未設定の場合、RSS から自動取得を試みる
@@ -267,7 +279,6 @@ async def post_create_hackmd():
         hackmd_text = hackmd_url or '（HackMD作成失敗）'
 
         # connpass が設定済みの場合は connpass URL も含める
-        data = load_data()
         connpass_url = data.get('connpass')
 
         if connpass_url:
@@ -314,8 +325,9 @@ async def check_and_post_connpass():
     """connpass URL が未設定の場合、RSS をチェックして自動投稿"""
     data = load_data()
 
+    # 読み込めない場合は何もしない（既定値で保存すると hackmd が消えるため）
     # connpass URL が設定済みの場合はスキップ
-    if data.get('connpass'):
+    if data is None or data.get('connpass'):
         return
 
     # RSS から次の月曜日のイベントを探す
@@ -342,6 +354,8 @@ async def check_and_post_connpass():
             print('connpass 自動取得による投稿を行いました')
 
 # スラッシュコマンド
+LOAD_ERROR_MESSAGE = '❌ データを読み込めませんでした．時間をおいて再実行してください'
+
 @bot.tree.command(name="ls", description="次の月曜日の日付と設定されているリンクを表示します")
 async def ls(interaction: discord.Interaction):
     # tomio2480 のみ実行可能
@@ -355,6 +369,9 @@ async def ls(interaction: discord.Interaction):
 
     # 現在の設定を読み込み
     data = load_data()
+    if data is None:
+        await interaction.response.send_message(LOAD_ERROR_MESSAGE, ephemeral=True)
+        return
     hackmd_text = data.get('hackmd') or '（HackMD 未設定）'
     connpass_text = data.get('connpass') or '（connpass 未設定）'
 
@@ -377,9 +394,12 @@ async def announce(interaction: discord.Interaction):
 
     # 現在の設定を読み込み
     data = load_data()
+    if data is None:
+        await interaction.response.send_message(LOAD_ERROR_MESSAGE, ephemeral=True)
+        return
     hackmd_url = data.get('hackmd')
     connpass_url = data.get('connpass')
-    
+
     # URLが空の場合は警告を表示
     if not hackmd_url or not connpass_url:
         missing = []
@@ -416,6 +436,9 @@ async def set_connpass(interaction: discord.Interaction, url: str):
     clean_url = url.split('?')[0]
 
     data = load_data()
+    if data is None:
+        await interaction.response.send_message(LOAD_ERROR_MESSAGE, ephemeral=True)
+        return
     data['connpass'] = clean_url
     save_data(data)
     await interaction.response.send_message(f'✅ connpass URL を設定しました: {clean_url}', ephemeral=True)
@@ -429,6 +452,9 @@ async def set_hackmd(interaction: discord.Interaction, url: str):
         return
 
     data = load_data()
+    if data is None:
+        await interaction.response.send_message(LOAD_ERROR_MESSAGE, ephemeral=True)
+        return
     data['hackmd'] = url
     save_data(data)
     await interaction.response.send_message(f'✅ HackMD URL を設定しました: {url}', ephemeral=True)
@@ -440,8 +466,6 @@ async def check_time(interaction: discord.Interaction):
         await interaction.response.send_message('❌ このコマンドを実行する権限がありません', ephemeral=True)
         return
 
-    import time
-    
     # 現在時刻（JST）
     now_jst = datetime.now(JST)
     

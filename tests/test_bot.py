@@ -583,6 +583,117 @@ def test_save_data_local_write_failure_does_not_skip_google_sheets():
 
 
 # ========================================
+# Google Sheets 障害時のデータ消失防止テスト
+# ========================================
+
+def test_load_data_returns_none_when_sheets_fails_and_no_cache():
+    """Sheets 設定済みで読み込みに失敗し，ローカルキャッシュも無ければ None を返す"""
+    with patch('bot.get_worksheet', side_effect=Exception('API error')):
+        with patch('os.path.exists', return_value=False):
+            with patch('bot.time.sleep'):
+                result = bot.load_data()
+
+    # 既定値ではなく None を返し，呼び出し側が上書き保存しないようにする
+    assert result is None
+
+
+def test_load_data_returns_local_cache_when_sheets_fails():
+    """Sheets 読み込みに失敗した場合はローカルキャッシュを返す"""
+    cached = {'hackmd': 'https://hackmd.io/cached', 'connpass': None}
+
+    with patch('bot.get_worksheet', side_effect=Exception('API error')):
+        with patch('os.path.exists', return_value=True):
+            with patch('builtins.open', mock_open(read_data=json.dumps(cached))):
+                with patch('bot.time.sleep'):
+                    result = bot.load_data()
+
+    assert result == cached
+
+
+def test_load_data_retries_sheets_read():
+    """Sheets 読み込みが一時的に失敗しても再試行して読み込む"""
+    mock_worksheet = MagicMock()
+    mock_worksheet.get_all_records.return_value = [
+        {'キー': 'hackmd', '値': 'https://hackmd.io/test'},
+        {'キー': 'connpass', '値': ''},
+    ]
+
+    with patch('bot.get_worksheet', side_effect=[Exception('transient'), mock_worksheet]) as mock_get:
+        with patch('bot.time.sleep') as mock_sleep:
+            result = bot.load_data()
+
+    assert result == {'hackmd': 'https://hackmd.io/test', 'connpass': None}
+    assert mock_get.call_count == 2
+    mock_sleep.assert_called_once()
+
+
+def test_save_data_retries_sheets_write():
+    """Sheets 書き込みが一時的に失敗しても再試行して保存する"""
+    test_data = {'hackmd': 'https://hackmd.io/test', 'connpass': None}
+    mock_worksheet = MagicMock()
+    mock_worksheet.clear.side_effect = [Exception('transient'), None]
+
+    with patch('bot.get_worksheet', return_value=mock_worksheet):
+        with patch('builtins.open', mock_open()):
+            with patch('bot.time.sleep'):
+                bot.save_data(test_data)
+
+    assert mock_worksheet.clear.call_count == 2
+    assert mock_worksheet.update.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_check_and_post_connpass_skips_when_load_fails():
+    """データを読み込めない場合は RSS 確認も保存も行わない（hackmd の上書き消失を防ぐ）"""
+    with patch('bot.load_data', return_value=None):
+        with patch('bot.check_connpass_rss') as mock_check:
+            with patch('bot.save_data') as mock_save:
+                await bot.check_and_post_connpass()
+
+    mock_check.assert_not_called()
+    mock_save.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_post_create_hackmd_saves_url_even_if_load_fails():
+    """19:00 にデータを読み込めなくても作成した HackMD URL は保存し投稿する"""
+    mock_channel = AsyncMock()
+    JST = pytz.timezone('Asia/Tokyo')
+    test_date = datetime(2024, 1, 8, 12, 0, 0, tzinfo=JST)
+    hackmd_url = 'https://hackmd.io/@tomio2480/blogread_20240108'
+
+    with patch.object(bot.bot, 'get_channel', return_value=mock_channel):
+        with patch('bot.get_next_monday', return_value=test_date):
+            with patch('bot.get_hackmd_template', return_value=''):
+                with patch('bot.create_hackmd_note', return_value=hackmd_url):
+                    with patch('bot.load_data', return_value=None):
+                        with patch('bot.check_connpass_rss', return_value=None):
+                            with patch('bot.save_data') as mock_save:
+                                await bot.post_create_hackmd()
+
+    mock_save.assert_called_once()
+    assert mock_save.call_args[0][0]['hackmd'] == hackmd_url
+    mock_channel.send.assert_called_once()
+    assert hackmd_url in mock_channel.send.call_args[0][0]
+
+
+@pytest.mark.asyncio
+async def test_post_start_posts_and_clears_even_if_load_fails():
+    """18:30 にデータを読み込めなくても投稿し，データをクリアする"""
+    mock_channel = AsyncMock()
+
+    with patch.object(bot.bot, 'get_channel', return_value=mock_channel):
+        with patch('bot.load_data', return_value=None):
+            with patch('bot.save_data') as mock_save:
+                await bot.post_start()
+
+    mock_channel.send.assert_called_once()
+    assert '（HackMD 未設定）' in mock_channel.send.call_args[0][0]
+    saved = mock_save.call_args[0][0]
+    assert saved['hackmd'] is None and saved['connpass'] is None
+
+
+# ========================================
 # post_start データクリアの堅牢性テスト
 # ========================================
 
