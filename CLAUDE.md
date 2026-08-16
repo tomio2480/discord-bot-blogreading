@@ -23,7 +23,7 @@ cp .env.example .env
 
 ### 全体構成
 
-- **bot.py**: メインファイル。Discord Bot, スケジューラ, HackMD API, Google Sheets, connpass RSS を統合
+- **bot.py**: メインファイル．Discord Bot・スケジューラ・HackMD API・Google Sheets・connpass RSS を統合
 - **Google Sheets**: HackMD と connpass の URL の正本（環境変数 `GOOGLE_SHEETS_*` 設定時）
 - **data.json**: ローカルキャッシュ（Git 管理外）．Sheets 未設定時は唯一の保存先
 - **APScheduler**: JST タイムゾーンで月曜日のスケジュールを管理
@@ -32,11 +32,13 @@ cp .env.example .env
 ### 主要コンポーネント
 
 1. **スケジューラ**: APScheduler で JST 月曜日の 6 つの時刻に自動投稿．connpass RSS を 10 分間隔で確認
-2. **スラッシュコマンド**: `/ls`, `/announce`, `/set_connpass`, `/set_hackmd`, `/check_time`（tomio2480 のみ許可，ephemeral で他人に非表示）
+2. **スラッシュコマンド**: `/ls`・`/announce`・`/set_connpass`・`/set_hackmd`・`/check_time`
+   - tomio2480 のみ許可し，ephemeral で他人に非表示
 3. **HackMD 連携**: `create_hackmd_note()` で次週用メモを自動作成
 4. **データ永続化**: `load_data()` / `save_data()`．Sheets の読み書きは 3 回再試行し，失敗時はキャッシュへ倒す
-   - 読み込みに失敗しキャッシュも無ければ `None` を返す．呼び出し側は既定値で上書き保存しない
-   - Sheets 保存に失敗したら `data.json` に `_unsynced` を付け，次回読み込み時に再同期する
+   - 読み込みに失敗しキャッシュも無ければ `None` を返す．他の呼び出し側は既定値で上書き保存しない
+   - 例外は 18:30 の投稿後で，読み込みの成否によらず両リンクを消す（19:00 の新規作成に備えた意図的な消去）
+   - Sheets 保存が失敗したら `data.json` へ `_unsynced` を付け，次回読み込み時に再同期する
    - Sheets 書き込みは行位置固定（2 行目 hackmd，3 行目 connpass）の部分更新
 
 ### 重要な実装詳細
