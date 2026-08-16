@@ -641,11 +641,32 @@ def test_load_data_retries_sheets_read():
 
     with patch('bot.get_worksheet', side_effect=[Exception('transient'), mock_worksheet]) as mock_get:
         with patch('bot.time.sleep') as mock_sleep:
-            result = bot.load_data()
+            with patch('builtins.open', mock_open()):
+                result = bot.load_data()
 
     assert result == {'hackmd': 'https://hackmd.io/test', 'connpass': None}
     assert mock_get.call_count == 2
     mock_sleep.assert_called_once()
+
+
+def test_load_data_refreshes_local_cache_after_sheets_read():
+    """Sheets を読み込めたら，その内容でローカルキャッシュを更新する（古いキャッシュが再同期で昇格しないように）"""
+    mock_worksheet = MagicMock()
+    mock_worksheet.get_all_records.return_value = [
+        {'キー': 'hackmd', '値': 'https://hackmd.io/remote'},
+        {'キー': 'connpass', '値': 'https://connpass.com/remote'},
+    ]
+    stale = json.dumps({'hackmd': 'https://hackmd.io/stale', 'connpass': None})
+    m = mock_open(read_data=stale)
+
+    with patch('bot.get_worksheet', return_value=mock_worksheet):
+        with patch('builtins.open', m):
+            with patch('os.path.exists', return_value=True):
+                result = bot.load_data()
+
+    assert result == {'hackmd': 'https://hackmd.io/remote', 'connpass': 'https://connpass.com/remote'}
+    m.assert_any_call('data.json', 'w', encoding='utf-8')
+    assert _written_json(m) == result
 
 
 def test_save_data_retries_sheets_write():

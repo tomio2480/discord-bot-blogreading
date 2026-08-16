@@ -134,6 +134,11 @@ def load_data():
     except Exception:
         return cached
     if data is not None:
+        # 読み込めた最新値でキャッシュを更新する（古いキャッシュが後の再同期で正になるのを防ぐ）
+        try:
+            write_local(data, unsynced=False)
+        except Exception as e:
+            print(f'ローカルファイルへのデータ保存エラー: {e}')
         return data
     return cached if cached is not None else dict(DEFAULT_DATA)
 
