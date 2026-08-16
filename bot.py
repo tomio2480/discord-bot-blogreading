@@ -97,66 +97,69 @@ def write_sheet(data):
     worksheet.batch_update(updates)
     return True
 
-def load_local(default):
-    """ローカルファイルからデータを読み込む．無い・読めない場合は default を返す"""
+# ローカルキャッシュが Google Sheets より新しい（未同期）ことを示す印．
+# メモリではなくファイルに残すことで，Bot の再起動をまたいでも判別できる
+UNSYNCED_KEY = '_unsynced'
+
+def load_local():
+    """ローカルキャッシュを読み込み (data, unsynced) を返す．無い・読めない場合は (None, False)"""
     try:
         if os.path.exists(DATA_FILE):
             with open(DATA_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
+                cached = json.load(f)
+            return cached, bool(cached.pop(UNSYNCED_KEY, False))
     except Exception as e:
         print(f'ローカルファイルの読み込みエラー: {e}')
-    return default
+    return None, False
 
-# Sheets への保存に失敗し，ローカルキャッシュのほうが新しい状態なら True
-sheets_dirty = False
+def write_local(data, unsynced):
+    """ローカルキャッシュを書き込む．unsynced なら未同期の印を付ける"""
+    os.makedirs(os.path.dirname(DATA_FILE) if os.path.dirname(DATA_FILE) else '.', exist_ok=True)
+    with open(DATA_FILE, 'w', encoding='utf-8') as f:
+        json.dump({**data, UNSYNCED_KEY: True} if unsynced else data, f, ensure_ascii=False, indent=2)
 
 def load_data():
     """データを読み込む．
     Google Sheets 設定時は Sheets を正とし，再試行しても読めなければローカルキャッシュを返す．
     キャッシュも無ければ None を返す（既定値を返すと後続の保存で hackmd が消えるため）．
-    直前の Sheets 保存に失敗している場合はローカルキャッシュを正とし，Sheets へ再同期する．
+    未同期の印が付いたキャッシュがあればそれを正とし，Sheets へ再同期する．
     """
-    if sheets_dirty:
-        cached = load_local(None)
-        if cached is not None:
-            print('未同期のローカルキャッシュを Google Sheets へ再同期します')
-            save_data(cached)
-            return cached
+    cached, unsynced = load_local()
+    if unsynced and cached is not None:
+        print('未同期のローカルキャッシュを Google Sheets へ再同期します')
+        save_data(cached)
+        return cached
     try:
         data = with_retry(read_sheet, 'Google Sheets 読み込み')
     except Exception:
-        return load_local(None)
-    return data if data is not None else load_local(dict(DEFAULT_DATA))
+        return cached
+    if data is not None:
+        return data
+    return cached if cached is not None else dict(DEFAULT_DATA)
 
 def save_data(data):
-    """Google Sheetsとローカルファイルの両方にデータを保存"""
-    global sheets_dirty
-    # ローカルファイルに常に保存（Sheets 障害時のキャッシュとして使う）
-    # ローカル書き込みが失敗しても Google Sheets への保存は継続する
-    local_saved = False
+    """Google Sheets とローカルキャッシュにデータを保存する．data は一部の項目だけでもよい．
+    Sheets へは渡された項目だけ書き，ローカルには既存キャッシュと統合した全項目を書く．
+    """
+    cached, was_unsynced = load_local()
+    merged = {**(cached or {}), **data}
+    # 未同期のキャッシュがあれば，その内容ごと Sheets へ書き戻す
+    payload = merged if was_unsynced else data
+
+    synced = True
     try:
-        os.makedirs(os.path.dirname(DATA_FILE) if os.path.dirname(DATA_FILE) else '.', exist_ok=True)
-        with open(DATA_FILE, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        local_saved = True
+        if with_retry(lambda: write_sheet(payload), 'Google Sheets 保存'):
+            print(f'Google Sheetsにデータを保存しました: {payload}')
+    except Exception:
+        synced = False
+        print('Google Sheets への保存に失敗しました．ローカルキャッシュのみ更新し，次回の読み込み時に再同期します')
+
+    # ローカルキャッシュは常に更新する（Sheets 障害時のフォールバック兼再同期の元データ）
+    try:
+        write_local(merged, unsynced=not synced)
+        print(f'ローカルファイルにデータを保存しました: {merged}')
     except Exception as e:
         print(f'ローカルファイルへのデータ保存エラー: {e}')
-
-    try:
-        if with_retry(lambda: write_sheet(data), 'Google Sheets 保存'):
-            sheets_dirty = False
-            print(f'Google Sheetsにデータを保存しました: {data}')
-            return
-    except Exception:
-        # ローカルに今回の値が書けている場合のみ，ローカルを正として再同期対象にする
-        if local_saved:
-            sheets_dirty = True
-            print('Google Sheets への保存に失敗しました．ローカルファイルのみ更新し，次回の読み込み時に再同期します')
-        else:
-            print('Google Sheets とローカルファイルの両方への保存に失敗しました')
-        return
-
-    print(f'ローカルファイルにデータを保存しました: {data}')
 
 def get_next_monday():
     """次の月曜日の日付を取得"""

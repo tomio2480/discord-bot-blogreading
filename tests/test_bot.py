@@ -59,8 +59,8 @@ def test_save_data():
     m = mock_open()
     with patch('builtins.open', m):
         bot.save_data(test_data)
-        
-    m.assert_called_once_with('data.json', 'w', encoding='utf-8')
+
+    m.assert_any_call('data.json', 'w', encoding='utf-8')
     handle = m()
     written_data = ''.join(call.args[0] for call in handle.write.call_args_list)
     assert json.loads(written_data) == test_data
@@ -551,7 +551,7 @@ def test_save_data_always_writes_local_file():
     # Google Sheets にも保存される
     mock_worksheet.batch_update.assert_called_once()
     # ローカルファイルにも書き込まれる
-    m.assert_called_once_with('data.json', 'w', encoding='utf-8')
+    m.assert_any_call('data.json', 'w', encoding='utf-8')
 
 
 def test_save_data_local_file_has_cleared_data_after_google_sheets_save():
@@ -662,53 +662,95 @@ def test_save_data_retries_sheets_write():
     assert mock_worksheet.batch_update.call_count == 2
 
 
-def test_load_data_resyncs_local_cache_after_failed_sheets_save():
-    """Sheets 保存に失敗した後，復旧した Sheets の古い値ではなくローカルキャッシュを正として再同期する"""
+def _written_json(m):
+    """mock_open へ書き込まれた内容を JSON として返す"""
+    handle = m()
+    return json.loads(''.join(call.args[0] for call in handle.write.call_args_list))
+
+
+def test_save_data_marks_cache_unsynced_when_sheets_fails():
+    """Sheets 保存に失敗した場合，ローカルキャッシュに未同期の印を付けて書く（再起動後も判別できるように）"""
     newer = {'hackmd': 'https://hackmd.io/new', 'connpass': None}
+    m = mock_open(read_data='')
+
+    with patch('bot.get_worksheet', side_effect=Exception('down')):
+        with patch('bot.time.sleep'):
+            with patch('builtins.open', m):
+                with patch('os.path.exists', return_value=False):
+                    bot.save_data(newer)
+
+    written = _written_json(m)
+    assert written[bot.UNSYNCED_KEY] is True
+    assert written['hackmd'] == newer['hackmd']
+
+
+def test_load_data_resyncs_unsynced_cache_when_sheets_recovers():
+    """未同期の印が付いたキャッシュがあれば，復旧した Sheets の古い値ではなくキャッシュを正として書き戻す"""
+    newer = {'hackmd': 'https://hackmd.io/new', 'connpass': None}
+    cached_file = json.dumps({**newer, bot.UNSYNCED_KEY: True})
     mock_worksheet = MagicMock()
     mock_worksheet.get_all_records.return_value = [{'キー': 'hackmd', '値': ''}]  # 古いリモート
-    # 保存時は 3 回とも失敗，その後の読み込み時には復旧している
-    side_effects = [Exception('down')] * bot.SHEETS_RETRY + [mock_worksheet]
+    m = mock_open(read_data=cached_file)
 
-    with patch.object(bot, 'sheets_dirty', False):
-        with patch('bot.get_worksheet', side_effect=side_effects):
-            with patch('bot.time.sleep'):
-                with patch('builtins.open', mock_open(read_data=json.dumps(newer))):
-                    with patch('os.path.exists', return_value=True):
-                        bot.save_data(newer)
-                        assert bot.sheets_dirty is True
-                        result = bot.load_data()
+    with patch('bot.get_worksheet', return_value=mock_worksheet):
+        with patch('bot.time.sleep'):
+            with patch('builtins.open', m):
+                with patch('os.path.exists', return_value=True):
+                    result = bot.load_data()
 
-        # ローカルキャッシュが返り，Sheets へ書き戻され，未同期フラグが下りる
-        assert result == newer
-        mock_worksheet.batch_update.assert_called_once()
-        assert bot.sheets_dirty is False
+    # キャッシュが返り，Sheets へ書き戻され，キャッシュの未同期の印が消える
+    assert result == newer
+    mock_worksheet.batch_update.assert_called_once()
+    mock_worksheet.get_all_records.assert_not_called()
+    assert bot.UNSYNCED_KEY not in _written_json(m)
 
 
-def test_save_data_does_not_mark_dirty_when_local_write_fails():
-    """ローカル書き込みも Sheets 保存も失敗した場合，古いキャッシュを正にしないよう未同期フラグは立てない"""
-    with patch.object(bot, 'sheets_dirty', False):
-        with patch('bot.get_worksheet', side_effect=Exception('down')):
-            with patch('bot.time.sleep'):
-                with patch('builtins.open', side_effect=OSError('read-only')):
-                    bot.save_data({'hackmd': 'https://hackmd.io/new', 'connpass': None})
-
-        assert bot.sheets_dirty is False
-
-
-def test_load_data_keeps_dirty_when_resync_fails():
-    """再同期にも失敗した場合はローカルキャッシュを返し，未同期のままにする"""
+def test_load_data_keeps_unsynced_when_resync_fails():
+    """再同期にも失敗した場合はキャッシュを返し，未同期の印を残す"""
     newer = {'hackmd': 'https://hackmd.io/new', 'connpass': None}
+    m = mock_open(read_data=json.dumps({**newer, bot.UNSYNCED_KEY: True}))
 
-    with patch.object(bot, 'sheets_dirty', True):
-        with patch('bot.get_worksheet', side_effect=Exception('still down')):
-            with patch('bot.time.sleep'):
-                with patch('builtins.open', mock_open(read_data=json.dumps(newer))):
-                    with patch('os.path.exists', return_value=True):
-                        result = bot.load_data()
+    with patch('bot.get_worksheet', side_effect=Exception('still down')):
+        with patch('bot.time.sleep'):
+            with patch('builtins.open', m):
+                with patch('os.path.exists', return_value=True):
+                    result = bot.load_data()
 
-        assert result == newer
-        assert bot.sheets_dirty is True
+    assert result == newer
+    assert _written_json(m)[bot.UNSYNCED_KEY] is True
+
+
+def test_save_data_merges_partial_update_into_local_cache():
+    """部分更新でも，ローカルキャッシュには既存内容と統合した全項目を書く"""
+    cached_file = json.dumps({'hackmd': 'https://hackmd.io/old', 'connpass': 'https://connpass.com/keep'})
+    mock_worksheet = MagicMock()
+    m = mock_open(read_data=cached_file)
+
+    with patch('bot.get_worksheet', return_value=mock_worksheet):
+        with patch('builtins.open', m):
+            with patch('os.path.exists', return_value=True):
+                bot.save_data({'hackmd': 'https://hackmd.io/new'})
+
+    # Sheets へは hackmd 行だけ，ローカルには統合済みスナップショット
+    ranges = [u['range'] for u in mock_worksheet.batch_update.call_args[0][0]]
+    assert ranges == ['A1:B1', 'A2:B2']
+    assert _written_json(m) == {'hackmd': 'https://hackmd.io/new', 'connpass': 'https://connpass.com/keep'}
+
+
+def test_save_data_pushes_full_cache_when_it_was_unsynced():
+    """未同期のキャッシュがある状態で部分更新すると，キャッシュの内容ごと Sheets へ書き戻す"""
+    cached_file = json.dumps({'hackmd': None, 'connpass': 'https://connpass.com/unsynced', bot.UNSYNCED_KEY: True})
+    mock_worksheet = MagicMock()
+    m = mock_open(read_data=cached_file)
+
+    with patch('bot.get_worksheet', return_value=mock_worksheet):
+        with patch('builtins.open', m):
+            with patch('os.path.exists', return_value=True):
+                bot.save_data({'hackmd': 'https://hackmd.io/new'})
+
+    ranges = [u['range'] for u in mock_worksheet.batch_update.call_args[0][0]]
+    assert ranges == ['A1:B1', 'A2:B2', 'A3:B3']
+    assert bot.UNSYNCED_KEY not in _written_json(m)
 
 
 @pytest.mark.asyncio
