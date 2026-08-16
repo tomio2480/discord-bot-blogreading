@@ -549,7 +549,7 @@ def test_save_data_always_writes_local_file():
             bot.save_data(test_data)
 
     # Google Sheets にも保存される
-    mock_worksheet.clear.assert_called_once()
+    mock_worksheet.batch_update.assert_called_once()
     # ローカルファイルにも書き込まれる
     m.assert_called_once_with('data.json', 'w', encoding='utf-8')
 
@@ -583,9 +583,24 @@ def test_save_data_local_write_failure_does_not_skip_google_sheets():
         with patch('builtins.open', side_effect=OSError('read-only file system')):
             bot.save_data(test_data)
 
-    # ローカル失敗に関わらず Google Sheets へ保存される
-    mock_worksheet.clear.assert_called_once()
-    assert mock_worksheet.update.call_count == 2
+    # ローカル失敗に関わらず Google Sheets へ保存される（ヘッダー + 2 項目）
+    mock_worksheet.batch_update.assert_called_once()
+    assert len(mock_worksheet.batch_update.call_args[0][0]) == 3
+
+
+def test_write_sheet_partial_update_preserves_other_rows():
+    """一部の項目だけ渡した場合，その行だけ更新し他の項目の行には触れない"""
+    mock_worksheet = MagicMock()
+
+    with patch('bot.get_worksheet', return_value=mock_worksheet):
+        with patch('builtins.open', mock_open()):
+            bot.save_data({'hackmd': 'https://hackmd.io/only'})
+
+    mock_worksheet.clear.assert_not_called()
+    ranges = [u['range'] for u in mock_worksheet.batch_update.call_args[0][0]]
+    assert ranges == ['A1:B1', 'A2:B2']  # ヘッダーと hackmd 行のみ．connpass 行（A3:B3）は保持
+    values = [u['values'] for u in mock_worksheet.batch_update.call_args[0][0]]
+    assert values[1] == [['hackmd', 'https://hackmd.io/only']]
 
 
 # ========================================
@@ -637,15 +652,14 @@ def test_save_data_retries_sheets_write():
     """Sheets 書き込みが一時的に失敗しても再試行して保存する"""
     test_data = {'hackmd': 'https://hackmd.io/test', 'connpass': None}
     mock_worksheet = MagicMock()
-    mock_worksheet.clear.side_effect = [Exception('transient'), None]
+    mock_worksheet.batch_update.side_effect = [Exception('transient'), None]
 
     with patch('bot.get_worksheet', return_value=mock_worksheet):
         with patch('builtins.open', mock_open()):
             with patch('bot.time.sleep'):
                 bot.save_data(test_data)
 
-    assert mock_worksheet.clear.call_count == 2
-    assert mock_worksheet.update.call_count == 2
+    assert mock_worksheet.batch_update.call_count == 2
 
 
 def test_load_data_resyncs_local_cache_after_failed_sheets_save():
@@ -667,7 +681,7 @@ def test_load_data_resyncs_local_cache_after_failed_sheets_save():
 
         # ローカルキャッシュが返り，Sheets へ書き戻され，未同期フラグが下りる
         assert result == newer
-        mock_worksheet.clear.assert_called_once()
+        mock_worksheet.batch_update.assert_called_once()
         assert bot.sheets_dirty is False
 
 
@@ -727,7 +741,10 @@ async def test_post_create_hackmd_saves_url_even_if_load_fails():
                                 await bot.post_create_hackmd()
 
     mock_save.assert_called_once()
-    assert mock_save.call_args[0][0]['hackmd'] == hackmd_url
+    saved = mock_save.call_args[0][0]
+    assert saved['hackmd'] == hackmd_url
+    # 読み込めなかった項目（connpass）は書かず，Sheets 上の既存値を保持する
+    assert 'connpass' not in saved
     mock_channel.send.assert_called_once()
     assert hackmd_url in mock_channel.send.call_args[0][0]
 

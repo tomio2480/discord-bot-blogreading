@@ -27,6 +27,8 @@ ALLOWED_USER = 'tomio2480'
 # データファイル
 DATA_FILE = 'data.json'
 DEFAULT_DATA = {'hackmd': None, 'connpass': None}
+# Google Sheets 上の行位置（2 行目から）をこの順で固定する
+DATA_KEYS = ['hackmd', 'connpass']
 
 # Google Sheets API の一時的な失敗に対する再試行回数と待機秒数
 SHEETS_RETRY = 3
@@ -81,15 +83,18 @@ def read_sheet():
     return data or dict(DEFAULT_DATA)
 
 def write_sheet(data):
-    """Google Sheets にデータを書き込む．未設定なら False を返す"""
+    """Google Sheets にデータを書き込む．未設定なら False を返す．
+    渡された項目の行だけ更新し，渡されなかった項目の行は保持する（部分更新）．
+    """
     worksheet = get_worksheet()
     if worksheet is None:
         return False
-    worksheet.clear()
-    worksheet.update('A1:B1', [['キー', '値']])
-    rows = [[key, value if value else ''] for key, value in data.items()]
-    if rows:
-        worksheet.update(f'A2:B{len(rows)+1}', rows)
+    updates = [{'range': 'A1:B1', 'values': [['キー', '値']]}]
+    for key, value in data.items():
+        if key in DATA_KEYS:
+            row = DATA_KEYS.index(key) + 2
+            updates.append({'range': f'A{row}:B{row}', 'values': [[key, value or '']]})
+    worksheet.batch_update(updates)
     return True
 
 def load_local(default):
@@ -280,7 +285,8 @@ async def post_create_hackmd():
         hackmd_url = create_hackmd_note(title, alias, content_with_title)
 
         # データ保存（読み込めない場合も作成した HackMD URL は必ず保存する）
-        data = load_data() or dict(DEFAULT_DATA)
+        # 読み込めない場合は判明した項目だけ書き，Sheets 上の他の項目（connpass 等）は保持する
+        data = load_data() or {}
         if hackmd_url:
             data['hackmd'] = hackmd_url
 

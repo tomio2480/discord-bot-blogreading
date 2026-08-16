@@ -51,6 +51,8 @@
 | キー | 値 |
 |------|-----|
 
+   Bot は 2 行目に `hackmd`、3 行目に `connpass` を書き込みます（行位置は固定）。
+
 5. URLから**スプレッドシートID**をコピー
    - URL: `https://docs.google.com/spreadsheets/d/【ここがスプレッドシートID】/edit`
    - 例: `1a2b3c4d5e6f7g8h9i0j`
