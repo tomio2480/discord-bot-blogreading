@@ -323,6 +323,8 @@ async def test_post_start():
     call_args = mock_channel.send.call_args[0][0]
     assert 'https://hackmd.io/test' in call_args
     assert 'https://connpass.com/test' in call_args
+    # リンクを含む投稿は埋め込みを抑止する
+    assert mock_channel.send.call_args.kwargs.get('suppress_embeds') is True
 
 
 @pytest.mark.asyncio
@@ -370,6 +372,8 @@ async def test_post_create_hackmd():
     call_args = mock_channel.send.call_args[0][0]
     assert '01/08 (月)' in call_args
     assert hackmd_url in call_args
+    # リンクを含む投稿は埋め込みを抑止する
+    assert mock_channel.send.call_args.kwargs.get('suppress_embeds') is True
 
 
 # ========================================
@@ -507,6 +511,8 @@ async def test_check_and_post_connpass_found_and_post():
     assert '01/08(月)' in call_args
     assert 'https://hackmd.io/test' in call_args
     assert connpass_url in call_args
+    # リンクを含む投稿は埋め込みを抑止する
+    assert mock_channel.send.call_args.kwargs.get('suppress_embeds') is True
 
 
 @pytest.mark.asyncio
@@ -525,3 +531,105 @@ async def test_check_and_post_connpass_no_hackmd():
     # connpass URL は保存されるが、投稿は行われない
     mock_save.assert_called_once()
     mock_channel.send.assert_not_called()
+
+
+# ========================================
+# データストア整合性のテスト
+# ========================================
+
+def test_save_data_always_writes_local_file():
+    """Google Sheets 保存成功時もローカルファイルに書き込むことを確認"""
+    test_data = {'hackmd': None, 'connpass': None}
+
+    mock_worksheet = MagicMock()
+    m = mock_open()
+
+    with patch('bot.get_worksheet', return_value=mock_worksheet):
+        with patch('builtins.open', m):
+            bot.save_data(test_data)
+
+    # Google Sheets にも保存される
+    mock_worksheet.clear.assert_called_once()
+    # ローカルファイルにも書き込まれる
+    m.assert_called_once_with('data.json', 'w', encoding='utf-8')
+
+
+def test_save_data_local_file_has_cleared_data_after_google_sheets_save():
+    """Google Sheets 保存後にローカルファイルにクリア済みデータが書き込まれることを確認"""
+    test_data = {'hackmd': None, 'connpass': None}
+
+    mock_worksheet = MagicMock()
+    m = mock_open()
+
+    with patch('bot.get_worksheet', return_value=mock_worksheet):
+        with patch('builtins.open', m):
+            bot.save_data(test_data)
+
+    # ローカルファイルに書き込まれたデータを検証
+    handle = m()
+    written_data = ''.join(call.args[0] for call in handle.write.call_args_list)
+    saved = json.loads(written_data)
+    assert saved['hackmd'] is None
+    assert saved['connpass'] is None
+
+
+def test_save_data_local_write_failure_does_not_skip_google_sheets():
+    """ローカル書き込みが失敗しても Google Sheets への保存は実行されることを確認"""
+    test_data = {'hackmd': 'https://hackmd.io/test', 'connpass': None}
+
+    mock_worksheet = MagicMock()
+
+    with patch('bot.get_worksheet', return_value=mock_worksheet):
+        with patch('builtins.open', side_effect=OSError('read-only file system')):
+            bot.save_data(test_data)
+
+    # ローカル失敗に関わらず Google Sheets へ保存される
+    mock_worksheet.clear.assert_called_once()
+    assert mock_worksheet.update.call_count == 2
+
+
+# ========================================
+# post_start データクリアの堅牢性テスト
+# ========================================
+
+@pytest.mark.asyncio
+async def test_post_start_clears_data_after_send():
+    """18:30 投稿後にデータがクリアされることを確認"""
+    mock_channel = AsyncMock()
+    test_data = {
+        'hackmd': 'https://hackmd.io/test',
+        'connpass': 'https://connpass.com/test'
+    }
+
+    with patch.object(bot.bot, 'get_channel', return_value=mock_channel):
+        with patch('bot.load_data', return_value=test_data):
+            with patch('bot.save_data') as mock_save:
+                await bot.post_start()
+
+    # save_data が呼ばれ、両方のURLがNoneになっていることを確認
+    mock_save.assert_called_once()
+    saved_data = mock_save.call_args[0][0]
+    assert saved_data['hackmd'] is None
+    assert saved_data['connpass'] is None
+
+
+@pytest.mark.asyncio
+async def test_post_start_clears_data_even_if_send_fails():
+    """channel.send が失敗してもデータがクリアされることを確認"""
+    mock_channel = AsyncMock()
+    mock_channel.send.side_effect = Exception('Discord API error')
+    test_data = {
+        'hackmd': 'https://hackmd.io/test',
+        'connpass': 'https://connpass.com/test'
+    }
+
+    with patch.object(bot.bot, 'get_channel', return_value=mock_channel):
+        with patch('bot.load_data', return_value=test_data):
+            with patch('bot.save_data') as mock_save:
+                await bot.post_start()
+
+    # send が失敗しても save_data が呼ばれ、データがクリアされることを確認
+    mock_save.assert_called_once()
+    saved_data = mock_save.call_args[0][0]
+    assert saved_data['hackmd'] is None
+    assert saved_data['connpass'] is None

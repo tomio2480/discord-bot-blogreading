@@ -98,30 +98,29 @@ def load_data():
     return {'hackmd': None, 'connpass': None}
 
 def save_data(data):
-    """Google Sheetsまたはローカルファイルにデータを保存"""
+    """Google Sheetsとローカルファイルの両方にデータを保存"""
+    # ローカルファイルに常に保存（フォールバック時の整合性を保証）
+    # ローカル書き込みが失敗しても Google Sheets への保存は継続する
+    try:
+        os.makedirs(os.path.dirname(DATA_FILE) if os.path.dirname(DATA_FILE) else '.', exist_ok=True)
+        with open(DATA_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f'ローカルファイルへのデータ保存エラー: {e}')
+
     try:
         worksheet = get_worksheet()
         if worksheet:
-            # 既存データをクリア
             worksheet.clear()
-            
-            # ヘッダーを設定
             worksheet.update('A1:B1', [['キー', '値']])
-            
-            # データを書き込み
             rows = [[key, value if value else ''] for key, value in data.items()]
             if rows:
                 worksheet.update(f'A2:B{len(rows)+1}', rows)
-            
             print(f'Google Sheetsにデータを保存しました: {data}')
             return
     except Exception as e:
         print(f'Google Sheetsへのデータ保存エラー: {e}')
-    
-    # Google Sheets未設定またはエラー時はローカルファイルを使用
-    os.makedirs(os.path.dirname(DATA_FILE) if os.path.dirname(DATA_FILE) else '.', exist_ok=True)
-    with open(DATA_FILE, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+
     print(f'ローカルファイルにデータを保存しました: {data}')
 
 def get_next_monday():
@@ -205,13 +204,16 @@ https://yamadashy.github.io/tech-blog-rss-feed/
 https://hatena.blog/dev
 https://techplay.jp/blog"""
 
-        await channel.send(message)
-        
-        # 投稿後にデータを削除（19:00の新規作成のため）
-        data['hackmd'] = None
-        data['connpass'] = None
-        save_data(data)
-        print('18:30投稿後にデータを削除しました')
+        try:
+            await channel.send(message, suppress_embeds=True)
+        except Exception as e:
+            print(f'18:30 投稿エラー: {e}')
+        finally:
+            # 投稿の成否に関わらずデータを削除（19:00の新規作成のため）
+            data['hackmd'] = None
+            data['connpass'] = None
+            save_data(data)
+            print('18:30投稿後にデータを削除しました')
 
 async def post_writing_time():
     """月曜 18:38 (JST) の投稿"""
@@ -277,7 +279,7 @@ async def post_create_hackmd():
 {hackmd_text}
 ※ connpass のリンクが未設定の場合は，set コマンドで connpass のリンクを設定してください．"""
 
-        await channel.send(message)
+        await channel.send(message, suppress_embeds=True)
 
 # connpass RSS 自動取得
 CONNPASS_RSS_URL = 'https://blogreading.connpass.com/ja.atom'
@@ -336,7 +338,7 @@ async def check_and_post_connpass():
             message = f"""次回 {date_str} 分
 {hackmd_url}
 {connpass_url}"""
-            await channel.send(message)
+            await channel.send(message, suppress_embeds=True)
             print('connpass 自動取得による投稿を行いました')
 
 # スラッシュコマンド
@@ -360,7 +362,7 @@ async def ls(interaction: discord.Interaction):
 HackMD: {hackmd_text}
 connpass: {connpass_text}"""
 
-    await interaction.response.send_message(message, ephemeral=True)
+    await interaction.response.send_message(message, ephemeral=True, suppress_embeds=True)
 
 @bot.tree.command(name="announce", description="次回の月曜日の情報をチャンネルに投稿します")
 async def announce(interaction: discord.Interaction):
@@ -397,7 +399,7 @@ async def announce(interaction: discord.Interaction):
     # チャンネルに投稿（ephemeralではない）
     channel = bot.get_channel(CHANNEL_ID)
     if channel:
-        await channel.send(message)
+        await channel.send(message, suppress_embeds=True)
         await interaction.response.send_message('✅ お知らせを投稿しました', ephemeral=True)
     else:
         await interaction.response.send_message('❌ チャンネルが見つかりません', ephemeral=True)
@@ -416,7 +418,7 @@ async def set_connpass(interaction: discord.Interaction, url: str):
     data = load_data()
     data['connpass'] = clean_url
     save_data(data)
-    await interaction.response.send_message(f'✅ connpass URL を設定しました: {clean_url}', ephemeral=True)
+    await interaction.response.send_message(f'✅ connpass URL を設定しました: {clean_url}', ephemeral=True, suppress_embeds=True)
 
 @bot.tree.command(name="set_hackmd", description="HackMD の URL を設定します")
 @app_commands.describe(url="HackMD メモの URL")
@@ -429,7 +431,7 @@ async def set_hackmd(interaction: discord.Interaction, url: str):
     data = load_data()
     data['hackmd'] = url
     save_data(data)
-    await interaction.response.send_message(f'✅ HackMD URL を設定しました: {url}', ephemeral=True)
+    await interaction.response.send_message(f'✅ HackMD URL を設定しました: {url}', ephemeral=True, suppress_embeds=True)
 
 @bot.tree.command(name="check_time", description="現在時刻とタイムゾーンを確認します")
 async def check_time(interaction: discord.Interaction):
