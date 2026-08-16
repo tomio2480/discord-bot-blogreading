@@ -128,6 +128,44 @@ async def test_aload_data_does_not_block_event_loop():
     assert event_was_set_before_load_finished == [True]
 
 
+@pytest.mark.asyncio
+async def test_storage_lock_serializes_access():
+    """aload_data / asave_data はモジュールレベルの lock で直列化され，同時に実行されない
+    （set_connpass と set_hackmd 等が重なっても互いのスナップショットを壊さないため）"""
+    in_progress = threading.Event()
+    overlap_detected = []
+
+    def fake_load_data():
+        if in_progress.is_set():
+            overlap_detected.append(True)
+        in_progress.set()
+        time_module.sleep(0.05)
+        in_progress.clear()
+        return {'hackmd': None, 'connpass': None}
+
+    with patch('bot.load_data', side_effect=fake_load_data):
+        await asyncio.gather(bot.aload_data(), bot.aload_data())
+
+    assert overlap_detected == []
+
+
+@pytest.mark.asyncio
+async def test_concurrent_saves_do_not_lose_other_field(tmp_path):
+    """異なる項目の部分更新が同時に走っても，互いのフィールドを消さない"""
+    data_file = tmp_path / 'data.json'
+
+    with patch('bot.DATA_FILE', str(data_file)):
+        with patch('bot.get_worksheet', return_value=None):
+            await asyncio.gather(
+                bot.asave_data({'hackmd': 'H'}),
+                bot.asave_data({'connpass': 'C'}),
+            )
+
+    saved = json.loads(data_file.read_text(encoding='utf-8'))
+    assert saved['hackmd'] == 'H'
+    assert saved['connpass'] == 'C'
+
+
 # ========================================
 # 日付計算のテスト
 # ========================================
@@ -371,6 +409,21 @@ async def test_set_connpass_saves_via_thread():
 
 
 @pytest.mark.asyncio
+async def test_set_connpass_saves_only_connpass():
+    """/set_connpass は変更した connpass だけを部分更新で保存し，hackmd を巻き込まない
+    （/set_hackmd や RSS ジョブとの同時実行で相手の更新を巻き戻さないため）"""
+    mock_interaction = make_interaction('tomio2480')
+    test_url = 'https://connpass.com/event/12345/?utm_source=x'
+    expected_url = 'https://connpass.com/event/12345/'
+
+    with patch('bot.aload_data', AsyncMock(return_value={'hackmd': 'https://hackmd.io/keep', 'connpass': None})):
+        with patch('bot.asave_data', AsyncMock()) as mock_asave:
+            await bot.set_connpass.callback(mock_interaction, test_url)
+
+    mock_asave.assert_awaited_once_with({'connpass': expected_url})
+
+
+@pytest.mark.asyncio
 async def test_set_hackmd_authorized():
     """HackMD設定コマンド"""
     mock_interaction = make_interaction('tomio2480')
@@ -392,6 +445,19 @@ async def test_set_hackmd_authorized():
     call_args = mock_interaction.followup.send.call_args
     assert call_args[1]['ephemeral'] is True
     assert call_args[1]['suppress_embeds'] is True
+
+
+@pytest.mark.asyncio
+async def test_set_hackmd_saves_only_hackmd():
+    """/set_hackmd は変更した hackmd だけを部分更新で保存し，connpass を巻き込まない"""
+    mock_interaction = make_interaction('tomio2480')
+    test_url = 'https://hackmd.io/test123'
+
+    with patch('bot.aload_data', AsyncMock(return_value={'hackmd': None, 'connpass': 'https://connpass.com/keep'})):
+        with patch('bot.asave_data', AsyncMock()) as mock_asave:
+            await bot.set_hackmd.callback(mock_interaction, test_url)
+
+    mock_asave.assert_awaited_once_with({'hackmd': test_url})
 
 
 # ========================================
@@ -987,3 +1053,21 @@ async def test_post_start_clears_data_even_if_send_fails():
     saved_data = mock_save.call_args[0][0]
     assert saved_data['hackmd'] is None
     assert saved_data['connpass'] is None
+
+
+@pytest.mark.asyncio
+async def test_post_start_clears_both_links():
+    """18:30 投稿後は hackmd・connpass の両方を None として部分更新で保存する
+    （19:00 の新規作成に備えた意図的な消去．辞書全体ではなく明示的な 2 項目のみ渡す）"""
+    mock_channel = AsyncMock()
+    test_data = {
+        'hackmd': 'https://hackmd.io/test',
+        'connpass': 'https://connpass.com/test'
+    }
+
+    with patch.object(bot.bot, 'get_channel', return_value=mock_channel):
+        with patch('bot.aload_data', AsyncMock(return_value=test_data)):
+            with patch('bot.asave_data', AsyncMock()) as mock_asave:
+                await bot.post_start()
+
+    mock_asave.assert_awaited_once_with({'hackmd': None, 'connpass': None})

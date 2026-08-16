@@ -167,13 +167,30 @@ def save_data(data):
     except Exception as e:
         print(f'ローカルファイルへのデータ保存エラー: {e}')
 
+# ストレージアクセスを直列化する．to_thread により読み書きが並行しうるため．
+# asyncio.Lock は生成時ではなく初回 acquire 時に実行中のイベントループへ束縛されるため，
+# モジュール読み込み時に生成すると，のちに別のイベントループ（テストの各関数等）から
+# 使われた際に RuntimeError になる．実行中ループごとに束縛し直す
+_storage_lock = None
+_storage_lock_loop = None
+
+def _get_storage_lock():
+    loop = asyncio.get_running_loop()
+    global _storage_lock, _storage_lock_loop
+    if _storage_lock is None or _storage_lock_loop is not loop:
+        _storage_lock = asyncio.Lock()
+        _storage_lock_loop = loop
+    return _storage_lock
+
 async def aload_data():
     """load_data をスレッドで実行する．再試行の待機中もイベントループを止めない"""
-    return await asyncio.to_thread(load_data)
+    async with _get_storage_lock():
+        return await asyncio.to_thread(load_data)
 
 async def asave_data(data):
     """save_data をスレッドで実行する．再試行の待機中もイベントループを止めない"""
-    return await asyncio.to_thread(save_data, data)
+    async with _get_storage_lock():
+        return await asyncio.to_thread(save_data, data)
 
 def get_next_monday():
     """次の月曜日の日付を取得"""
@@ -263,9 +280,7 @@ https://techplay.jp/blog"""
             print(f'18:30 投稿エラー: {e}')
         finally:
             # 投稿の成否に関わらずデータを削除（19:00の新規作成のため）
-            data['hackmd'] = None
-            data['connpass'] = None
-            await asave_data(data)
+            await asave_data({'hackmd': None, 'connpass': None})
             print('18:30投稿後にデータを削除しました')
 
 async def post_writing_time():
@@ -306,15 +321,17 @@ async def post_create_hackmd():
         data = await aload_data() or {}
         if hackmd_url:
             data['hackmd'] = hackmd_url
+            updates = {'hackmd': hackmd_url}
 
             # connpass URL が未設定の場合、RSS から自動取得を試みる
             if not data.get('connpass'):
                 connpass_url = check_connpass_rss()
                 if connpass_url:
                     data['connpass'] = connpass_url
+                    updates['connpass'] = connpass_url
                     print(f'connpass URL を自動設定しました: {connpass_url}')
 
-            await asave_data(data)
+            await asave_data(updates)
 
         # 投稿
         date_str = next_monday.strftime('%m/%d (月)')
@@ -379,7 +396,7 @@ async def check_and_post_connpass():
 
     # connpass URL を保存
     data['connpass'] = connpass_url
-    await asave_data(data)
+    await asave_data({'connpass': connpass_url})
     print(f'connpass URL を自動設定しました: {connpass_url}')
 
     # /announce と同じ内容を投稿
@@ -490,8 +507,7 @@ async def set_connpass(interaction: discord.Interaction, url: str):
     if data is None:
         await interaction.followup.send(LOAD_ERROR_MESSAGE, ephemeral=True)
         return
-    data['connpass'] = clean_url
-    await asave_data(data)
+    await asave_data({'connpass': clean_url})
     await interaction.followup.send(f'✅ connpass URL を設定しました: {clean_url}', ephemeral=True, suppress_embeds=True)
 
 @bot.tree.command(name="set_hackmd", description="HackMD の URL を設定します")
@@ -509,8 +525,7 @@ async def set_hackmd(interaction: discord.Interaction, url: str):
     if data is None:
         await interaction.followup.send(LOAD_ERROR_MESSAGE, ephemeral=True)
         return
-    data['hackmd'] = url
-    await asave_data(data)
+    await asave_data({'hackmd': url})
     await interaction.followup.send(f'✅ HackMD URL を設定しました: {url}', ephemeral=True, suppress_embeds=True)
 
 @bot.tree.command(name="check_time", description="現在時刻とタイムゾーンを確認します")
