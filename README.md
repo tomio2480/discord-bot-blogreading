@@ -133,7 +133,9 @@ Northflank の無料枠では常時起動が可能で，Discord bot に最適で
 ### データ永続化の注意
 
 Northflank では再起動時にファイルが消えます。`data.json` は揮発性です。
-長期的には外部データベース（MongoDB Atlas 無料枠等）の使用を推奨します。
+[Google Sheets データ保存](#6-google-sheets-データ保存の設定推奨) を設定してください。
+設定時は Google Sheets を正とし、`data.json` は障害時のキャッシュとして使います。
+詳細は [GOOGLE_SHEETS_SETUP.md](GOOGLE_SHEETS_SETUP.md) の「フォールバック機能」を参照してください。
 
 ## 技術スタック
 
