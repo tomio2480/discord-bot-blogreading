@@ -648,6 +648,44 @@ def test_save_data_retries_sheets_write():
     assert mock_worksheet.update.call_count == 2
 
 
+def test_load_data_resyncs_local_cache_after_failed_sheets_save():
+    """Sheets 保存に失敗した後，復旧した Sheets の古い値ではなくローカルキャッシュを正として再同期する"""
+    newer = {'hackmd': 'https://hackmd.io/new', 'connpass': None}
+    mock_worksheet = MagicMock()
+    mock_worksheet.get_all_records.return_value = [{'キー': 'hackmd', '値': ''}]  # 古いリモート
+    # 保存時は 3 回とも失敗，その後の読み込み時には復旧している
+    side_effects = [Exception('down')] * bot.SHEETS_RETRY + [mock_worksheet]
+
+    with patch.object(bot, 'sheets_dirty', False):
+        with patch('bot.get_worksheet', side_effect=side_effects):
+            with patch('bot.time.sleep'):
+                with patch('builtins.open', mock_open(read_data=json.dumps(newer))):
+                    with patch('os.path.exists', return_value=True):
+                        bot.save_data(newer)
+                        assert bot.sheets_dirty is True
+                        result = bot.load_data()
+
+        # ローカルキャッシュが返り，Sheets へ書き戻され，未同期フラグが下りる
+        assert result == newer
+        mock_worksheet.clear.assert_called_once()
+        assert bot.sheets_dirty is False
+
+
+def test_load_data_keeps_dirty_when_resync_fails():
+    """再同期にも失敗した場合はローカルキャッシュを返し，未同期のままにする"""
+    newer = {'hackmd': 'https://hackmd.io/new', 'connpass': None}
+
+    with patch.object(bot, 'sheets_dirty', True):
+        with patch('bot.get_worksheet', side_effect=Exception('still down')):
+            with patch('bot.time.sleep'):
+                with patch('builtins.open', mock_open(read_data=json.dumps(newer))):
+                    with patch('os.path.exists', return_value=True):
+                        result = bot.load_data()
+
+        assert result == newer
+        assert bot.sheets_dirty is True
+
+
 @pytest.mark.asyncio
 async def test_check_and_post_connpass_skips_when_load_fails():
     """データを読み込めない場合は RSS 確認も保存も行わない（hackmd の上書き消失を防ぐ）"""

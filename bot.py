@@ -102,11 +102,21 @@ def load_local(default):
         print(f'ローカルファイルの読み込みエラー: {e}')
     return default
 
+# Sheets への保存に失敗し，ローカルキャッシュのほうが新しい状態なら True
+sheets_dirty = False
+
 def load_data():
     """データを読み込む．
     Google Sheets 設定時は Sheets を正とし，再試行しても読めなければローカルキャッシュを返す．
     キャッシュも無ければ None を返す（既定値を返すと後続の保存で hackmd が消えるため）．
+    直前の Sheets 保存に失敗している場合はローカルキャッシュを正とし，Sheets へ再同期する．
     """
+    if sheets_dirty:
+        cached = load_local(None)
+        if cached is not None:
+            print('未同期のローカルキャッシュを Google Sheets へ再同期します')
+            save_data(cached)
+            return cached
     try:
         data = with_retry(read_sheet, 'Google Sheets 読み込み')
     except Exception:
@@ -115,6 +125,7 @@ def load_data():
 
 def save_data(data):
     """Google Sheetsとローカルファイルの両方にデータを保存"""
+    global sheets_dirty
     # ローカルファイルに常に保存（Sheets 障害時のキャッシュとして使う）
     # ローカル書き込みが失敗しても Google Sheets への保存は継続する
     try:
@@ -126,10 +137,12 @@ def save_data(data):
 
     try:
         if with_retry(lambda: write_sheet(data), 'Google Sheets 保存'):
+            sheets_dirty = False
             print(f'Google Sheetsにデータを保存しました: {data}')
             return
     except Exception:
-        print('Google Sheets への保存に失敗しました．ローカルファイルのみ更新しています')
+        sheets_dirty = True
+        print('Google Sheets への保存に失敗しました．ローカルファイルのみ更新し，次回の読み込み時に再同期します')
         return
 
     print(f'ローカルファイルにデータを保存しました: {data}')
