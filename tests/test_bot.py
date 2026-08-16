@@ -18,7 +18,7 @@ os.environ.setdefault('DISCORD_TOKEN', 'test_token')
 os.environ.setdefault('DISCORD_CHANNEL_ID', '123456789')
 os.environ.setdefault('HACKMD_API_TOKEN', 'test_hackmd_token')
 
-# discord.pyのインポートをモック化（Python 3.13のaudioop問題を回避）
+# discord.pyのインポートをモック化（Discord への接続を伴わずに関数単体を検証するため）
 sys.modules['discord'] = MagicMock()
 sys.modules['discord.ext'] = MagicMock()
 sys.modules['discord.ext.commands'] = MagicMock()
