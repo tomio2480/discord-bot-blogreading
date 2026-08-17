@@ -42,7 +42,7 @@ cp .env.example .env
 
 ### 主要コンポーネント
 
-1. **スケジューラ**: APScheduler で JST 月曜日の 6 つの時刻に自動投稿．connpass RSS を 10 分間隔で確認
+1. **スケジューラ**: APScheduler で JST 月曜日の 6 つの時刻に自動投稿．10 分間隔のジョブは，リンク不足または未同期の間だけ Sheets を確認し，connpass 未設定時だけ RSS も確認
 2. **スラッシュコマンド**: `/ls`・`/announce`・`/set_connpass`・`/set_hackmd`・`/check_time`
    - tomio2480 のみ許可し，ephemeral で他人に非表示
 3. **HackMD 連携**: `create_hackmd_note()` で次週用メモを自動作成
