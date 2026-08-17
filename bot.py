@@ -36,6 +36,10 @@ DATA_KEYS = ['hackmd', 'connpass']
 SHEETS_RETRY = 3
 SHEETS_RETRY_WAIT = 2
 
+# 18:30 投稿で必要なリンクが不足した場合の再取得回数と待機秒数
+START_DATA_RETRY = 3
+START_DATA_RETRY_WAIT = 10
+
 # 日本標準時
 JST = pytz.timezone('Asia/Tokyo')
 
@@ -102,6 +106,37 @@ def write_sheet(data):
 # ローカルキャッシュが Google Sheets より新しい（未同期）ことを示す印．
 # メモリではなくファイルに残すことで，Bot の再起動をまたいでも判別できる
 UNSYNCED_KEY = '_unsynced'
+COMPLETE_SNAPSHOT_KEY = '_complete_snapshot'
+
+def data_fields(data):
+    """内部メタデータを除いたリンク項目だけを返す"""
+    if data is None:
+        return None
+    return {key: data.get(key) for key in DATA_KEYS}
+
+def has_complete_links(data):
+    """HackMD と connpass の両リンクが設定済みなら True を返す"""
+    return data is not None and all(
+        str(data.get(key) or '').strip() for key in DATA_KEYS
+    )
+
+def complete_snapshot_from(cache):
+    """キャッシュ内の完全スナップショットを返す．無効・未保存なら None"""
+    if cache is None:
+        return None
+    snapshot = cache.get(COMPLETE_SNAPSHOT_KEY)
+    return data_fields(snapshot) if has_complete_links(snapshot) else None
+
+def cache_with_snapshot(data, previous_cache=None):
+    """リンクがそろった時点の完全スナップショットをキャッシュへ保持する"""
+    cached = dict(data)
+    if has_complete_links(cached):
+        cached[COMPLETE_SNAPSHOT_KEY] = data_fields(cached)
+    else:
+        previous_snapshot = complete_snapshot_from(previous_cache)
+        if previous_snapshot is not None:
+            cached[COMPLETE_SNAPSHOT_KEY] = previous_snapshot
+    return cached
 
 def load_local():
     """ローカルキャッシュを読み込み (data, unsynced) を返す．無い・読めない場合は (None, False)"""
@@ -125,30 +160,36 @@ def write_local(data, unsynced):
 # load_data が内部で save_data を呼ぶ再同期経路があるため RLock を使う
 _storage_lock = threading.RLock()
 
-def load_data():
-    """データを読み込む．
+def load_data_with_status():
+    """データを読み込み，(data, sheets_read_failed) を返す．
     Google Sheets 設定時は Sheets を正とし，再試行しても読めなければローカルキャッシュを返す．
     キャッシュも無ければ None を返す（既定値を返すと後続の保存で hackmd が消えるため）．
     未同期の印が付いたキャッシュがあればそれを正とし，Sheets へ再同期する．
+    sheets_read_failed により，正常に読み取った未設定値と取得失敗を呼び出し側で区別できる．
     """
     with _storage_lock:
         cached, unsynced = load_local()
         if unsynced and cached is not None:
             print('未同期のローカルキャッシュを Google Sheets へ再同期します')
             save_data(cached)
-            return cached
+            return data_fields(cached), False
         try:
             data = with_retry(read_sheet, 'Google Sheets 読み込み')
         except Exception:
-            return cached
+            return data_fields(cached), True
         if data is not None:
             # 読み込めた最新値でキャッシュを更新する（古いキャッシュが後の再同期で正になるのを防ぐ）
             try:
-                write_local(data, unsynced=False)
+                write_local(cache_with_snapshot(data, cached), unsynced=False)
             except Exception as e:
                 print(f'ローカルファイルへのデータ保存エラー: {e}')
-            return data
-        return cached if cached is not None else dict(DEFAULT_DATA)
+            return data, False
+        return (data_fields(cached) if cached is not None else dict(DEFAULT_DATA)), False
+
+def load_data():
+    """データを読み込む．既存の呼び出し向けにデータだけを返す"""
+    data, _ = load_data_with_status()
+    return data
 
 def save_data(data):
     """Google Sheets とローカルキャッシュにデータを保存する．data は一部の項目だけでもよい．
@@ -157,6 +198,10 @@ def save_data(data):
     with _storage_lock:
         cached, was_unsynced = load_local()
         merged = {**(cached or {}), **data}
+        if COMPLETE_SNAPSHOT_KEY in data and data[COMPLETE_SNAPSHOT_KEY] is None:
+            merged.pop(COMPLETE_SNAPSHOT_KEY, None)
+        else:
+            merged = cache_with_snapshot(merged, cached)
         # 未同期のキャッシュがあれば，その内容ごと Sheets へ書き戻す
         payload = merged if was_unsynced else data
 
@@ -182,6 +227,45 @@ async def aload_data():
 async def asave_data(data):
     """save_data をスレッドで実行する．再試行の待機中もイベントループを止めない"""
     return await asyncio.to_thread(save_data, data)
+
+async def aload_data_with_status():
+    """load_data_with_status をスレッドで実行する"""
+    return await asyncio.to_thread(load_data_with_status)
+
+async def aload_local():
+    """ローカルキャッシュをスレッドで読み込む"""
+    return await asyncio.to_thread(load_local)
+
+async def load_start_data():
+    """18:30 投稿用データを読み込む．Sheets 取得失敗時だけ再試行する"""
+    best_data = dict(DEFAULT_DATA)
+    for attempt in range(1, START_DATA_RETRY + 1):
+        loaded, sheets_read_failed = await aload_data_with_status()
+        if not sheets_read_failed:
+            return data_fields(loaded) if loaded is not None else dict(DEFAULT_DATA)
+
+        cached, _ = await aload_local()
+        snapshot = complete_snapshot_from(cached)
+        for candidate in (snapshot, loaded):
+            if candidate is not None:
+                for key in DATA_KEYS:
+                    value = candidate.get(key)
+                    if str(value or '').strip():
+                        best_data[key] = value
+
+        missing_keys = [key for key in DATA_KEYS if not best_data[key]]
+        if not missing_keys:
+            return best_data
+
+        print(
+            f'18:30 Google Sheets 取得失敗 ({attempt}/{START_DATA_RETRY}): '
+            f'キャッシュで不足している項目 '
+            f'{", ".join(missing_keys)}'
+        )
+        if attempt < START_DATA_RETRY:
+            await asyncio.sleep(START_DATA_RETRY_WAIT)
+
+    return best_data
 
 def get_next_monday():
     """次の月曜日の日付を取得"""
@@ -248,8 +332,7 @@ async def post_start():
     """月曜 18:30 (JST) の投稿"""
     channel = bot.get_channel(CHANNEL_ID)
     if channel:
-        # 読み込めない場合も投稿は行い，投稿後のクリアで状態を確定させる
-        data = await aload_data() or dict(DEFAULT_DATA)
+        data = await load_start_data()
         now = datetime.now(JST)
         date_str = now.strftime('%m/%d(月)')
 
@@ -269,10 +352,15 @@ https://techplay.jp/blog"""
             await channel.send(message, suppress_embeds=True)
         except Exception as e:
             print(f'18:30 投稿エラー: {e}')
-        finally:
-            # 投稿の成否に関わらずデータを削除（19:00の新規作成のため）
-            await asave_data({'hackmd': None, 'connpass': None})
-            print('18:30投稿後にデータを削除しました')
+            return
+
+        # 投稿できた場合だけ，19:00 の新規作成に備えて削除する
+        await asave_data({
+            'hackmd': None,
+            'connpass': None,
+            COMPLETE_SNAPSHOT_KEY: None,
+        })
+        print('18:30投稿後にデータを削除しました')
 
 async def post_writing_time():
     """月曜 18:38 (JST) の投稿"""
@@ -373,6 +461,10 @@ def check_connpass_rss():
 
 async def check_and_post_connpass():
     """connpass URL が未設定の場合、RSS をチェックして自動投稿"""
+    cached, unsynced = await aload_local()
+    if has_complete_links(cached) and not unsynced:
+        return
+
     data = await aload_data()
 
     # 読み込めない場合は何もしない（既定値で保存すると hackmd が消えるため）
