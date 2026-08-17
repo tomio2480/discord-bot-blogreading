@@ -62,7 +62,9 @@ def test_save_data():
     m.assert_any_call('data.json', 'w', encoding='utf-8')
     handle = m()
     written_data = ''.join(call.args[0] for call in handle.write.call_args_list)
-    assert json.loads(written_data) == test_data
+    written = json.loads(written_data)
+    assert bot.data_fields(written) == test_data
+    assert written[bot.COMPLETE_SNAPSHOT_KEY] == test_data
 
 
 # ========================================
@@ -500,8 +502,12 @@ async def test_post_start():
     }
     
     with patch.object(bot.bot, 'get_channel', return_value=mock_channel):
-        with patch('bot.load_data', return_value=test_data):
-            await bot.post_start()
+        with patch(
+            'bot.aload_data_with_status',
+            AsyncMock(return_value=(test_data, False)),
+        ):
+            with patch('bot.asave_data', AsyncMock()):
+                await bot.post_start()
     
     mock_channel.send.assert_called_once()
     call_args = mock_channel.send.call_args[0][0]
@@ -644,14 +650,48 @@ def test_check_connpass_rss_error():
 
 @pytest.mark.asyncio
 async def test_check_and_post_connpass_already_set():
-    """connpass URL が設定済みの場合はスキップ"""
+    """両リンクがローカルに設定済みなら Sheets と RSS の通信をスキップする"""
     test_data = {'hackmd': 'https://hackmd.io/test', 'connpass': 'https://connpass.com/existing'}
 
-    with patch('bot.load_data', return_value=test_data):
-        with patch('bot.check_connpass_rss') as mock_check:
-            await bot.check_and_post_connpass()
-            # RSS チェックが呼ばれないことを確認
-            mock_check.assert_not_called()
+    with patch('bot.aload_local', AsyncMock(return_value=(test_data, False))):
+        with patch('bot.aload_data', AsyncMock()) as mock_load:
+            with patch('bot.check_connpass_rss') as mock_check:
+                await bot.check_and_post_connpass()
+
+    mock_load.assert_not_awaited()
+    mock_check.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_check_and_post_connpass_reads_sheets_while_data_is_incomplete():
+    """ローカルデータが不足している間は Sheets を確認する"""
+    local_data = {'hackmd': 'https://hackmd.io/test', 'connpass': None}
+    remote_data = {'hackmd': 'https://hackmd.io/test', 'connpass': 'https://connpass.com/existing'}
+
+    with patch('bot.aload_local', AsyncMock(return_value=(local_data, False))):
+        with patch('bot.aload_data', AsyncMock(return_value=remote_data)) as mock_load:
+            with patch('bot.check_connpass_rss') as mock_check:
+                await bot.check_and_post_connpass()
+
+    mock_load.assert_awaited_once()
+    mock_check.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_check_and_post_connpass_resyncs_complete_unsynced_cache():
+    """両リンクがそろっていても未同期なら Sheets への再同期を試みる"""
+    test_data = {
+        'hackmd': 'https://hackmd.io/test',
+        'connpass': 'https://connpass.com/existing',
+    }
+
+    with patch('bot.aload_local', AsyncMock(return_value=(test_data, True))):
+        with patch('bot.aload_data', AsyncMock(return_value=test_data)) as mock_load:
+            with patch('bot.check_connpass_rss') as mock_check:
+                await bot.check_and_post_connpass()
+
+    mock_load.assert_awaited_once()
+    mock_check.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -659,12 +699,13 @@ async def test_check_and_post_connpass_not_found():
     """RSS からイベントが見つからない場合"""
     test_data = {'hackmd': 'https://hackmd.io/test', 'connpass': None}
 
-    with patch('bot.load_data', return_value=test_data):
-        with patch('bot.check_connpass_rss', return_value=None):
-            with patch('bot.save_data') as mock_save:
-                await bot.check_and_post_connpass()
-                # save_data が呼ばれないことを確認
-                mock_save.assert_not_called()
+    with patch('bot.aload_local', AsyncMock(return_value=(test_data, False))):
+        with patch('bot.aload_data', AsyncMock(return_value=test_data)):
+            with patch('bot.check_connpass_rss', return_value=None):
+                with patch('bot.asave_data', AsyncMock()) as mock_save:
+                    await bot.check_and_post_connpass()
+
+    mock_save.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -677,16 +718,17 @@ async def test_check_and_post_connpass_found_and_post():
     JST = pytz.timezone('Asia/Tokyo')
     next_monday = datetime(2024, 1, 8, 12, 0, 0, tzinfo=JST)
 
-    with patch('bot.load_data', return_value=test_data):
-        with patch('bot.check_connpass_rss', return_value=connpass_url):
-            with patch('bot.save_data') as mock_save:
-                with patch('bot.get_next_monday', return_value=next_monday):
-                    with patch.object(bot.bot, 'get_channel', return_value=mock_channel):
-                        await bot.check_and_post_connpass()
+    with patch('bot.aload_local', AsyncMock(return_value=(test_data, False))):
+        with patch('bot.aload_data', AsyncMock(return_value=test_data)):
+            with patch('bot.check_connpass_rss', return_value=connpass_url):
+                with patch('bot.asave_data', AsyncMock()) as mock_save:
+                    with patch('bot.get_next_monday', return_value=next_monday):
+                        with patch.object(bot.bot, 'get_channel', return_value=mock_channel):
+                            await bot.check_and_post_connpass()
 
     # データが保存されたことを確認
-    mock_save.assert_called_once()
-    saved_data = mock_save.call_args[0][0]
+    mock_save.assert_awaited_once()
+    saved_data = mock_save.await_args.args[0]
     assert saved_data['connpass'] == connpass_url
 
     # 投稿が行われたことを確認
@@ -706,14 +748,15 @@ async def test_check_and_post_connpass_no_hackmd():
     test_data = {'hackmd': None, 'connpass': None}
     connpass_url = 'https://blogreading.connpass.com/event/12345/'
 
-    with patch('bot.load_data', return_value=test_data):
-        with patch('bot.check_connpass_rss', return_value=connpass_url):
-            with patch('bot.save_data') as mock_save:
-                with patch.object(bot.bot, 'get_channel', return_value=mock_channel):
-                    await bot.check_and_post_connpass()
+    with patch('bot.aload_local', AsyncMock(return_value=(test_data, False))):
+        with patch('bot.aload_data', AsyncMock(return_value=test_data)):
+            with patch('bot.check_connpass_rss', return_value=connpass_url):
+                with patch('bot.asave_data', AsyncMock()) as mock_save:
+                    with patch.object(bot.bot, 'get_channel', return_value=mock_channel):
+                        await bot.check_and_post_connpass()
 
     # connpass URL は保存されるが、投稿は行われない
-    mock_save.assert_called_once()
+    mock_save.assert_awaited_once()
     mock_channel.send.assert_not_called()
 
 
@@ -755,6 +798,33 @@ def test_save_data_local_file_has_cleared_data_after_google_sheets_save():
     saved = json.loads(written_data)
     assert saved['hackmd'] is None
     assert saved['connpass'] is None
+
+
+def test_save_data_clears_complete_snapshot_at_cycle_boundary():
+    """18:30 の消去では前週の完全スナップショットも破棄する"""
+    snapshot = {
+        'hackmd': 'https://hackmd.io/old',
+        'connpass': 'https://connpass.com/old',
+    }
+    cached_file = json.dumps({
+        **snapshot,
+        bot.COMPLETE_SNAPSHOT_KEY: snapshot,
+    })
+    m = mock_open(read_data=cached_file)
+
+    with patch('bot.get_worksheet', return_value=MagicMock()):
+        with patch('builtins.open', m):
+            with patch('os.path.exists', return_value=True):
+                bot.save_data({
+                    'hackmd': None,
+                    'connpass': None,
+                    bot.COMPLETE_SNAPSHOT_KEY: None,
+                })
+
+    written = _written_json(m)
+    assert written['hackmd'] is None
+    assert written['connpass'] is None
+    assert bot.COMPLETE_SNAPSHOT_KEY not in written
 
 
 def test_save_data_local_write_failure_does_not_skip_google_sheets():
@@ -815,6 +885,36 @@ def test_load_data_returns_local_cache_when_sheets_fails():
     assert result == cached
 
 
+def test_load_data_with_status_distinguishes_sheets_failure():
+    """Sheets 取得失敗はキャッシュの内容とは別に成否で判別できる"""
+    cached = {'hackmd': None, 'connpass': 'https://connpass.com/cached'}
+
+    with patch('bot.get_worksheet', side_effect=Exception('API error')):
+        with patch('os.path.exists', return_value=True):
+            with patch('builtins.open', mock_open(read_data=json.dumps(cached))):
+                with patch('bot.time.sleep'):
+                    data, sheets_read_failed = bot.load_data_with_status()
+
+    assert data == cached
+    assert sheets_read_failed is True
+
+
+def test_load_data_with_status_distinguishes_unset_sheet_value():
+    """Sheets を正常に読み取った未設定値は取得失敗と区別できる"""
+    mock_worksheet = MagicMock()
+    mock_worksheet.get_all_records.return_value = [
+        {'キー': 'hackmd', '値': ''},
+        {'キー': 'connpass', '値': 'https://connpass.com/test'},
+    ]
+
+    with patch('bot.get_worksheet', return_value=mock_worksheet):
+        with patch('builtins.open', mock_open()):
+            data, sheets_read_failed = bot.load_data_with_status()
+
+    assert data == {'hackmd': None, 'connpass': 'https://connpass.com/test'}
+    assert sheets_read_failed is False
+
+
 def test_load_data_retries_sheets_read():
     """Sheets 読み込みが一時的に失敗しても再試行して読み込む"""
     mock_worksheet = MagicMock()
@@ -850,7 +950,38 @@ def test_load_data_refreshes_local_cache_after_sheets_read():
 
     assert result == {'hackmd': 'https://hackmd.io/remote', 'connpass': 'https://connpass.com/remote'}
     m.assert_any_call('data.json', 'w', encoding='utf-8')
-    assert _written_json(m) == result
+    written = _written_json(m)
+    assert bot.data_fields(written) == result
+    assert written[bot.COMPLETE_SNAPSHOT_KEY] == result
+
+
+def test_load_data_preserves_complete_snapshot_when_latest_data_is_partial():
+    """最新の Sheets が未設定を含んでも，今週分の完全スナップショットは保持する"""
+    snapshot = {
+        'hackmd': 'https://hackmd.io/snapshot',
+        'connpass': 'https://connpass.com/snapshot',
+    }
+    cached_file = json.dumps({
+        **snapshot,
+        bot.COMPLETE_SNAPSHOT_KEY: snapshot,
+    })
+    mock_worksheet = MagicMock()
+    mock_worksheet.get_all_records.return_value = [
+        {'キー': 'hackmd', '値': ''},
+        {'キー': 'connpass', '値': 'https://connpass.com/current'},
+    ]
+    m = mock_open(read_data=cached_file)
+
+    with patch('bot.get_worksheet', return_value=mock_worksheet):
+        with patch('builtins.open', m):
+            with patch('os.path.exists', return_value=True):
+                result = bot.load_data()
+
+    assert result == {
+        'hackmd': None,
+        'connpass': 'https://connpass.com/current',
+    }
+    assert _written_json(m)[bot.COMPLETE_SNAPSHOT_KEY] == snapshot
 
 
 def test_save_data_retries_sheets_write():
@@ -939,7 +1070,10 @@ def test_save_data_merges_partial_update_into_local_cache():
     # Sheets へは hackmd 行だけ，ローカルには統合済みスナップショット
     ranges = [u['range'] for u in mock_worksheet.batch_update.call_args[0][0]]
     assert ranges == ['A1:B1', 'A2:B2']
-    assert _written_json(m) == {'hackmd': 'https://hackmd.io/new', 'connpass': 'https://connpass.com/keep'}
+    written = _written_json(m)
+    expected = {'hackmd': 'https://hackmd.io/new', 'connpass': 'https://connpass.com/keep'}
+    assert bot.data_fields(written) == expected
+    assert written[bot.COMPLETE_SNAPSHOT_KEY] == expected
 
 
 def test_save_data_pushes_full_cache_when_it_was_unsynced():
@@ -961,13 +1095,14 @@ def test_save_data_pushes_full_cache_when_it_was_unsynced():
 @pytest.mark.asyncio
 async def test_check_and_post_connpass_skips_when_load_fails():
     """データを読み込めない場合は RSS 確認も保存も行わない（hackmd の上書き消失を防ぐ）"""
-    with patch('bot.load_data', return_value=None):
-        with patch('bot.check_connpass_rss') as mock_check:
-            with patch('bot.save_data') as mock_save:
-                await bot.check_and_post_connpass()
+    with patch('bot.aload_local', AsyncMock(return_value=(None, False))):
+        with patch('bot.aload_data', AsyncMock(return_value=None)):
+            with patch('bot.check_connpass_rss') as mock_check:
+                with patch('bot.asave_data', AsyncMock()) as mock_save:
+                    await bot.check_and_post_connpass()
 
     mock_check.assert_not_called()
-    mock_save.assert_not_called()
+    mock_save.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -997,19 +1132,157 @@ async def test_post_create_hackmd_saves_url_even_if_load_fails():
 
 
 @pytest.mark.asyncio
-async def test_post_start_posts_and_clears_even_if_load_fails():
-    """18:30 にデータを読み込めなくても投稿し，データをクリアする"""
+async def test_post_start_retries_and_posts_even_if_load_fails():
+    """18:30 にデータを読み込めない場合も再試行後に投稿する"""
     mock_channel = AsyncMock()
 
     with patch.object(bot.bot, 'get_channel', return_value=mock_channel):
-        with patch('bot.load_data', return_value=None):
-            with patch('bot.save_data') as mock_save:
-                await bot.post_start()
+        with patch('bot.aload_data_with_status', AsyncMock(return_value=(None, True))) as mock_load:
+            with patch('bot.aload_local', AsyncMock(return_value=(None, False))):
+                with patch('bot.asyncio.sleep', AsyncMock()) as mock_sleep:
+                    with patch('bot.asave_data', AsyncMock()) as mock_save:
+                        await bot.post_start()
 
-    mock_channel.send.assert_called_once()
+    assert mock_load.await_count == bot.START_DATA_RETRY
+    assert mock_sleep.await_count == bot.START_DATA_RETRY - 1
+    mock_channel.send.assert_awaited_once()
     assert '（HackMD 未設定）' in mock_channel.send.call_args[0][0]
-    saved = mock_save.call_args[0][0]
-    assert saved['hackmd'] is None and saved['connpass'] is None
+    assert '（connpass 未設定）' in mock_channel.send.call_args[0][0]
+    mock_save.assert_awaited_once_with({
+        'hackmd': None,
+        'connpass': None,
+        bot.COMPLETE_SNAPSHOT_KEY: None,
+    })
+
+
+@pytest.mark.asyncio
+async def test_post_start_retries_incomplete_data_and_posts_complete_result():
+    """18:30 の初回取得に失敗した場合は再取得した完全な内容を投稿する"""
+    mock_channel = AsyncMock()
+    complete_data = {
+        'hackmd': 'https://hackmd.io/test',
+        'connpass': 'https://connpass.com/test',
+    }
+
+    with patch.object(bot.bot, 'get_channel', return_value=mock_channel):
+        with patch('bot.aload_data_with_status', AsyncMock(side_effect=[
+            ({'hackmd': None, 'connpass': 'https://connpass.com/test'}, True),
+            (complete_data, False),
+        ])) as mock_load:
+            with patch('bot.aload_local', AsyncMock(return_value=(None, False))):
+                with patch('bot.asyncio.sleep', AsyncMock()) as mock_sleep:
+                    with patch('bot.asave_data', AsyncMock()):
+                        await bot.post_start()
+
+    assert mock_load.await_count == 2
+    mock_sleep.assert_awaited_once_with(bot.START_DATA_RETRY_WAIT)
+    message = mock_channel.send.call_args[0][0]
+    assert complete_data['hackmd'] in message
+    assert complete_data['connpass'] in message
+    assert '未設定' not in message
+
+
+@pytest.mark.asyncio
+async def test_post_start_keeps_values_found_across_retries():
+    """再取得ごとに得られたリンクを保持し，両方がそろった状態で投稿する"""
+    mock_channel = AsyncMock()
+    hackmd_url = 'https://hackmd.io/test'
+    connpass_url = 'https://connpass.com/test'
+
+    with patch.object(bot.bot, 'get_channel', return_value=mock_channel):
+        with patch('bot.aload_data_with_status', AsyncMock(side_effect=[
+            ({'hackmd': hackmd_url, 'connpass': None}, True),
+            ({'hackmd': None, 'connpass': connpass_url}, True),
+        ])):
+            with patch('bot.aload_local', AsyncMock(return_value=(None, False))):
+                with patch('bot.asyncio.sleep', AsyncMock()):
+                    with patch('bot.asave_data', AsyncMock()):
+                        await bot.post_start()
+
+    message = mock_channel.send.call_args[0][0]
+    assert hackmd_url in message
+    assert connpass_url in message
+
+
+@pytest.mark.asyncio
+async def test_post_start_posts_partial_data_after_all_failures():
+    """再取得後も不足する場合は，18:30 の開始通知を優先して投稿する"""
+    mock_channel = AsyncMock()
+    connpass_url = 'https://connpass.com/test'
+
+    with patch.object(bot.bot, 'get_channel', return_value=mock_channel):
+        with patch('bot.aload_data_with_status', AsyncMock(return_value=({
+            'hackmd': None,
+            'connpass': connpass_url,
+        }, True))) as mock_load:
+            with patch('bot.aload_local', AsyncMock(return_value=(None, False))):
+                with patch('bot.asyncio.sleep', AsyncMock()):
+                    with patch('bot.asave_data', AsyncMock()) as mock_save:
+                        await bot.post_start()
+
+    assert mock_load.await_count == bot.START_DATA_RETRY
+    message = mock_channel.send.call_args[0][0]
+    assert '（HackMD 未設定）' in message
+    assert connpass_url in message
+    mock_save.assert_awaited_once_with({
+        'hackmd': None,
+        'connpass': None,
+        bot.COMPLETE_SNAPSHOT_KEY: None,
+    })
+
+
+@pytest.mark.asyncio
+async def test_post_start_uses_complete_snapshot_when_sheets_read_fails():
+    """18:30 の Sheets 取得失敗時は今週分の完全スナップショットを使う"""
+    mock_channel = AsyncMock()
+    snapshot = {
+        'hackmd': 'https://hackmd.io/snapshot',
+        'connpass': 'https://connpass.com/snapshot',
+    }
+    cached = {
+        'hackmd': None,
+        'connpass': None,
+        bot.COMPLETE_SNAPSHOT_KEY: snapshot,
+    }
+
+    with patch.object(bot.bot, 'get_channel', return_value=mock_channel):
+        with patch(
+            'bot.aload_data_with_status',
+            AsyncMock(return_value=(None, True)),
+        ) as mock_load:
+            with patch('bot.aload_local', AsyncMock(return_value=(cached, False))):
+                with patch('bot.asyncio.sleep', AsyncMock()) as mock_sleep:
+                    with patch('bot.asave_data', AsyncMock()):
+                        await bot.post_start()
+
+    mock_load.assert_awaited_once()
+    mock_sleep.assert_not_awaited()
+    message = mock_channel.send.call_args.args[0]
+    assert snapshot['hackmd'] in message
+    assert snapshot['connpass'] in message
+
+
+@pytest.mark.asyncio
+async def test_post_start_does_not_retry_unset_sheet_value():
+    """Sheets を正常に読み取れた未設定値では再試行しない"""
+    mock_channel = AsyncMock()
+    connpass_url = 'https://connpass.com/test'
+    sheet_data = {'hackmd': None, 'connpass': connpass_url}
+
+    with patch.object(bot.bot, 'get_channel', return_value=mock_channel):
+        with patch(
+            'bot.aload_data_with_status',
+            AsyncMock(return_value=(sheet_data, False)),
+        ) as mock_load:
+            with patch('bot.asyncio.sleep', AsyncMock()) as mock_sleep:
+                with patch('bot.asave_data', AsyncMock()):
+                    await bot.post_start()
+
+    mock_load.assert_awaited_once()
+    mock_sleep.assert_not_awaited()
+    message = mock_channel.send.call_args[0][0]
+    assert '（HackMD 未設定）' in message
+    assert connpass_url in message
 
 
 # ========================================
@@ -1026,20 +1299,23 @@ async def test_post_start_clears_data_after_send():
     }
 
     with patch.object(bot.bot, 'get_channel', return_value=mock_channel):
-        with patch('bot.load_data', return_value=test_data):
-            with patch('bot.save_data') as mock_save:
+        with patch(
+            'bot.aload_data_with_status',
+            AsyncMock(return_value=(test_data, False)),
+        ):
+            with patch('bot.asave_data', AsyncMock()) as mock_save:
                 await bot.post_start()
 
-    # save_data が呼ばれ、両方のURLがNoneになっていることを確認
-    mock_save.assert_called_once()
-    saved_data = mock_save.call_args[0][0]
-    assert saved_data['hackmd'] is None
-    assert saved_data['connpass'] is None
+    mock_save.assert_awaited_once_with({
+        'hackmd': None,
+        'connpass': None,
+        bot.COMPLETE_SNAPSHOT_KEY: None,
+    })
 
 
 @pytest.mark.asyncio
-async def test_post_start_clears_data_even_if_send_fails():
-    """channel.send が失敗してもデータがクリアされることを確認"""
+async def test_post_start_preserves_data_if_send_fails():
+    """channel.send が失敗した場合は再送できるようデータを保持する"""
     mock_channel = AsyncMock()
     mock_channel.send.side_effect = Exception('Discord API error')
     test_data = {
@@ -1048,15 +1324,14 @@ async def test_post_start_clears_data_even_if_send_fails():
     }
 
     with patch.object(bot.bot, 'get_channel', return_value=mock_channel):
-        with patch('bot.load_data', return_value=test_data):
-            with patch('bot.save_data') as mock_save:
+        with patch(
+            'bot.aload_data_with_status',
+            AsyncMock(return_value=(test_data, False)),
+        ):
+            with patch('bot.asave_data', AsyncMock()) as mock_save:
                 await bot.post_start()
 
-    # send が失敗しても save_data が呼ばれ、データがクリアされることを確認
-    mock_save.assert_called_once()
-    saved_data = mock_save.call_args[0][0]
-    assert saved_data['hackmd'] is None
-    assert saved_data['connpass'] is None
+    mock_save.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1070,8 +1345,15 @@ async def test_post_start_clears_both_links():
     }
 
     with patch.object(bot.bot, 'get_channel', return_value=mock_channel):
-        with patch('bot.aload_data', AsyncMock(return_value=test_data)):
+        with patch(
+            'bot.aload_data_with_status',
+            AsyncMock(return_value=(test_data, False)),
+        ):
             with patch('bot.asave_data', AsyncMock()) as mock_asave:
                 await bot.post_start()
 
-    mock_asave.assert_awaited_once_with({'hackmd': None, 'connpass': None})
+    mock_asave.assert_awaited_once_with({
+        'hackmd': None,
+        'connpass': None,
+        bot.COMPLETE_SNAPSHOT_KEY: None,
+    })
