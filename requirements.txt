@@ -1,12 +1,12 @@
 discord.py==2.7.1
 APScheduler==3.10.4
 pytz==2023.3
-python-dotenv==1.0.0
-requests==2.31.0
+python-dotenv==1.2.2
+requests==2.33.1
 # eMudhra 中間 CA 鍵漏洩（GHSA-6q48-6c7w-9gw2）への対応として下限を置く．
 certifi>=2026.10.19
-pytest==7.4.3
-pytest-asyncio==0.21.1
+pytest==9.0.3
+pytest-asyncio==1.3.0
 pytest-mock==3.12.0
 pytest-cov==4.1.0
 gspread==6.0.0
